@@ -19,7 +19,6 @@
 (require 'gptel-curl)
 
 
-
 ;;;###autoload
 (define-minor-mode magit-gptcommit-mode
   "Magit gptcommit mode."
@@ -34,31 +33,66 @@
                                 'append)
         )
     ;; Disable mode
-    (remove-hook 'magit-status-sections-hook #'magit-gptcommit--insert-gptcommit))
+    (remove-hook 'magit-status-sections-hook #'magit-gptcommit--status-insert-gptcommit))
   )
 
-(defcustom magit-gptcommit--prompt ""
-  "My custom text variable"
+(defvar magit-gptcommit--last-message nil
+  "GPT generated commit message for current repository.")
+(defvar magit-gptcommit--active-section-list nil
+  "List of active gptcommit sections for current repository.")
+(defvar magit-gptcommit--active-process nil
+  "Running gptcommit process for current repository.
+Stored as a cons cell (PROCESS . RESPONSE) where RESPONE is a SSO Message.")
+
+(defconst magit-gptcommit--prompt-one-line "You are an expert programmer writing a commit message.
+You went over every file diff that was changed in it.
+
+First Determine the best label for the diffs.
+Here are the labels you can choose from:
+- build: Changes that affect the build system or external dependencies (example scopes: gulp, broccoli, npm)
+- chore: Updating libraries, copyrights or other repo setting, includes updating dependencies.
+- ci: Changes to our CI configuration files and scripts (example scopes: Travis, Circle, GitHub Actions)
+- docs: Non-code changes, such as fixing typos or adding new documentation
+- feat: a commit of the type feat introduces a new feature to the codebase
+- fix: A commit of the type fix patches a bug in your codebase
+- perf: A code change that improves performance
+- refactor: A code change that neither fixes a bug nor adds a feature
+- style: Changes that do not affect the meaning of the code (white-space, formatting, missing semi-colons, etc)
+- test: Adding missing tests or correcting existing tests
+
+Then summarize the commit into a single specific and cohesive theme.
+Remember to write in only one line, no more than 50 characters.
+Write your response using the imperative tense following the kernel git commit style guide.
+Write a high level title.
+
+THE FILE DIFFS:
+```
+%s
+```
+Now write Commit message in follow template: [label]:[one line of summary] :
+")
+
+(defcustom magit-gptcommit--prompt magit-gptcommit--prompt-one-line
+  "The prompt that was used to generate the commit message."
   :type 'string
   :group 'magit-gptcommit)
 
-(let* ((directory (expand-file-name "assets/magit-gptcommit/" user-emacs-directory))
-       (file-path (expand-file-name "prompt.txt" directory))
-       (url "https://example.com/prompt.txt"))
-  (unless (file-exists-p directory)
-    (make-directory directory t))
-  (if (file-exists-p file-path)
-      (with-temp-buffer
-        (insert-file-contents file-path)
-        (setq magit-gptcommit--prompt (buffer-string)))
-    ;; TODO download from url
-    (url-retrieve url (lambda (status)
-                        (when (equal (car status) :ok)
-                          (with-temp-buffer (url-retrieve-sentinel (current-buffer))
-                                            (write-region (point-min) (point-max) file-path)
-                                            (setq magit-gptcommit--prompt (buffer-string))))))
-    )
-  )
+(defun magit-gptcommit-load-prompt ()
+  (let* ((directory (expand-file-name "assets/magit-gptcommit/" user-emacs-directory))
+         (file-path (expand-file-name "prompt.txt" directory))
+         (url "https://example.com/prompt.txt"))
+    (unless (file-exists-p directory)
+      (make-directory directory t))
+    (if (file-exists-p file-path)
+        (with-temp-buffer
+          (insert-file-contents file-path)
+          (setq magit-gptcommit--prompt (buffer-string)))
+      ;; TODO download from url
+      (url-retrieve url (lambda (status)
+p                          (when (equal (car status) :ok)
+                            (with-temp-buffer (url-retrieve-sentinel (current-buffer))
+                                              (write-region (point-min) (point-max) file-path)
+                                              (setq magit-gptcommit--prompt (buffer-string)))))))))
 
 (defcustom magit-gptcommit--max-token 4096
   "Max token length."
@@ -70,12 +104,11 @@
 
 (cl-defun magit-gptcommit--move-last-to-position (list position)
   "Move the last element of LIST to POSITION."
-  (append (take position list) (last list) (butlast (-drop position list)))
-  )
+  (append (take position list) (last list) (butlast (-drop position list))))
 
 (cl-defun magit-gptcommit--goto-target-position (&optional (condition '(tags tag branch))) ;;
   "Return end position of section after which to insert the commit message.
-Position is determined by CONDITION, which is a list of symbols"
+Position is determined by CONDITION, which is defined in `magit-section-match'."
   (let ((children (oref magit-root-section children))
         (pos 0)
         )
@@ -90,6 +123,10 @@ Position is determined by CONDITION, which is a list of symbols"
     (when (< pos (length children))
       pos)))
 
+(cl-defun magit-gptcommit--cache-key (content &optional (repository (magit-repository-local-repository)))
+  "Return cache key for CONTENT and REPOSITORY."
+  ;; set repository to default if not initial
+  (md5 (format "%s%s" repository content)))
 
 (defun magit-gptcommit--retrieve-stashed-diff ()
   "Retrieve stashed diff.
@@ -105,67 +142,97 @@ assuming current section is staged section."
                  (oref section children)))
          (total (with-slots (content end) section
                   (- (marker-position end) (marker-position content)))))
-    (message "total: %s, max-char: %s" total max-char)
-    (message "diffs: %s" diffs)
     (if (> total max-char)
         (mapconcat
          (lambda (child)
-           (with-slots (start) child
-             (buffer-substring-no-properties start
-                                             (+ (marker-position start)
-                                                (* max-char (/ (cdr child) total))))))
+           (buffer-substring-no-properties (car child)
+                                           (+ (marker-position (car child))
+                                              (floor (* max-char (/ (float (cdr child)) total))))))
          diffs "\n")
       (with-slots (content end) section
         (buffer-substring-no-properties content end)))))
 
+(cl-defun magit-gptcommit--running-p (&optional (repository (magit-repository-local-repository)))
+  "Return non-nil if gptcommit is running for current REPOSITORY."
+    ;; any running process associated with this buffer?
+  ;; (proc-attrs
+  ;;  (cl-find-if
+  ;;   (lambda (proc-list) ;; (process . attrs)
+  ;;     (eq (plist-get (cdr proc-list) :buffer) buf))
+  ;;   gptel-curl--process-alist))
+  ;; (proc (car proc-attrs))
+  (magit-repository-local-exists-p 'magit-gptcommit--active-process repository)
+  )
+(cl-defun magit-gptcommit--abort (&optional (repository (magit-repository-local-repository)))
+  "Abort gptcommit process for current REPOSITORY."
+  (magit-repository-local-delete 'magit-gptcommit-active-abort repository)
+  (gptel-abort (current-buffer))
+  )
+
 (defun magit-gptcommit--status-insert-gptcommit ()
   "Insert gptcommit section into status buffer."
   (save-excursion
-    (make-variable-buffer-local 'magit-gptcommit--active)
-    (make-variable-buffer-local 'magit-gptcommit--tmp)
-    (if-let ((pos (magit-gptcommit--goto-target-position 'staged)))
-        ;; 存在 staged 才自动生成
-        (if-let* ((diff (magit-gptcommit--retrieve-stashed-diff))
-                  (buf (current-buffer))
-                  (inhibit-read-only t)
-                  ;; any running process associated with this buffer?
-                  (proc-attrs
-                   (cl-find-if
-                    (lambda (proc-list) ;; (process . attrs)
-                      (eq (plist-get (cdr proc-list) :buffer) buf))
-                    gptel-curl--process-alist))
-                  (proc (car proc-attrs))
-                  (reminder "Generating...")
-                  )
+    ;; 存在 staged 才自动生成 TODO: magit-anything-staged-p
+    (if-let ((buf (current-buffer))
+             (pos (magit-gptcommit--goto-target-position 'staged)))
+        (if (magit-gptcommit--running-p)
             ;; if yes, then just insert the generated commit message
-            (let ((magit-insert-section--parent magit-root-section))
+            (let ((inhibit-read-only t)
+                  (reminder "Generating...")
+                  (magit-insert-section--parent magit-root-section))
               (magit-insert-section (gptcommit nil nil)
                 (magit-insert-heading (format "GPT Commit(%s)" reminder))
-                (insert magit-gptcommit--tmp)
+                (insert (cdr (magit-repository-local-get 'magit-gptcommit--active-process)))
                 (insert "\n")
                 )
               (oset magit-root-section children
                     (magit-gptcommit--move-last-to-position
-                     (oref magit-root-section children) pos))
-              )
-
-          (setq magit-gptcommit--active t)
-          (magit-gptcommit-gptel-get-response
-           (list :prompt (list (list :role "user" :content (format magit-gptcommit--prompt diff)))
-                 :buffer buf
-                 :position (point-marker)
-                 )
-           (apply-partially #'magit-gptcommit--stream-insert-response 'staged)
-           )
-          )
+                     (oref magit-root-section children) pos)))
+          (let ((diff (magit-gptcommit--retrieve-stashed-diff)))
+            (magit-repository-local-delete 'magit-gptcommit--last-message)
+            (magit-gptcommit-gptel-get-response
+             (list :prompt (list (list :role "user" :content (format magit-gptcommit--prompt diff)))
+                   :buffer buf
+                   :position (point-marker))
+             (apply-partially #'magit-gptcommit--stream-insert-response 'staged))))
       ;; (message "No Staged, Ignore!")
-      )
-    )
-  )
+      )))
+
+;;;; Commit Message
+(defun magit-gptcommit-commit-accept ()
+  "Accept gptcommit message, after saving current message."
+  (interactive)
+  (when-let ((message (magit-repository-local-get 'magit-gptcommit--last-message))
+             (buf (magit-commit-message-buffer)))
+    (with-current-buffer buf
+      ;; save the current non-empty and newly written comment,
+      ;; because otherwise it would be irreversibly lost.
+      (when-let ((message (git-commit-buffer-message)))
+        (unless (ring-member log-edit-comment-ring message)
+          (ring-insert log-edit-comment-ring message)))
+      ;; Delete the message but not the instructions at the end.
+      (save-restriction
+        (goto-char (point-min))
+        (narrow-to-region
+         (point)
+         (if (re-search-forward (concat "^" comment-start) nil t)
+             (max 1 (- (point) 2))
+           (point-max)))
+        (delete-region (point-min) (point)))
+      ;; Insert the new message.
+      (insert message))))
+
+
+(defun magit-gptcommit-commit-quick ()
+  "Accept gptcommit message and make a commit with current staged."
+  (interactive)
+  (when-let ((message (magit-repository-local-get 'magit-gptcommit--last-message)))
+    (magit-run-git "commit" "-m" message)
+    ))
 
 ;;;; gptel
 
-;;; modified from `gptel-curl-get-response'
+;;;;; modified from `gptel-curl-get-response'
 (defun magit-gptcommit-gptel-get-response (info callback)
   "Retrieve response to prompt in INFO.
 
@@ -185,6 +252,9 @@ the response is inserted into the current buffer after point."
                          (generate-new-buffer "*gptel-curl*") "curl" args)))
     (when gptel--debug
       (message "%S" args))
+    ;; store process in repository-local variable
+    (magit-repository-local-set 'magit-gptcommit--active-process
+                                (cons process nil))
     (with-current-buffer (process-buffer process)
       (set-process-query-on-exit-flag process nil)
       (setf (alist-get process gptel-curl--process-alist)
@@ -279,6 +349,8 @@ PROCESS and _STATUS are process parameters."
       (with-current-buffer gptel-buffer
         (run-hook-with-args 'gptel-post-response-functions response-beg response-end)))
     (setf (alist-get process gptel-curl--process-alist nil 'remove) nil)
+    ;; clear repository-local variable
+    (magit-repository-local-delete 'magit-gptcommit--active-process)
     (kill-buffer proc-buf)))
 
 (defun magit-gptcommit--stream-filter (process output)
@@ -341,20 +413,20 @@ MSG the response
   (let ((buf (plist-get info :buffer))
         (tracking-marker (plist-get info :tracking-marker)) ;; dupilicate with section end
         )
-    (with-current-buffer buf
-      (make-variable-buffer-local 'magit-gptcommit--active)
-      (make-variable-buffer-local 'magit-gptcommit--tmp)
-      (setq magit-gptcommit--active t)
+    (with-current-buffer buf  ;; the buffer who start the gptcommit
       (save-excursion
-        (let ((inhibit-read-only t)
-              (magit-insert-section--parent magit-root-section))
+        (let* ((inhibit-read-only t)
+              (magit-insert-section--parent magit-root-section)
+              (process-pair (magit-repository-local-get 'magit-gptcommit--active-process))
+              (tmp-message (cdr process-pair))
+              )
           ;; if gptcommit already existed
           (if (magit-gptcommit--goto-target-position 'gptcommit)
               ;; update existing section(current section)
-              (with-slots (end) (magit-current-section) ;; TODO 不一定是 marker
-                (message "update existing section: %s" msg)
-                (setq magit-gptcommit--tmp (concat magit-gptcommit--tmp msg))
-                (goto-char  (1- end)) ;; 换行符前
+              (with-slots (end) (magit-current-section) ;; TODO: 不一定是 marker
+                ;; (message "update existing section: %s" msg)
+                (setcdr process-pair (concat tmp-message msg))
+                (goto-char  (1- end)) ;; before \newline
                 (insert msg)
                 (setq tracking-marker end)
                 ;; (set-marker-insertion-type tracking-marker t)
@@ -363,10 +435,10 @@ MSG the response
             ;; insert new section
             (let ((pos (magit-gptcommit--goto-target-position condition)))
               (message "insert new section")
-              (setq magit-gptcommit--tmp msg)
+              (setcdr process-pair msg)
               (magit-insert-section (gptcommit nil nil)
                 (magit-insert-heading "GPT Commit")
-                (insert magit-gptcommit--tmp)
+                (insert msg)
                 (insert "\n")
                 )
               (oset magit-root-section children
@@ -390,6 +462,9 @@ INFO metadata"
             (with-slots (start content end) section ;; TODO 不一定是 marker
               (pcase status
                 ('success
+                 (message "%s" 'success)
+                 (magit-repository-local-set 'magit-gptcommit--last-message
+                                            (cdr (magit-repository-local-get 'magit-gptcommit--active-process)))
                  ;; update section properties
                  (put-text-property content end 'magit-section section)
                  ;; update keymap
