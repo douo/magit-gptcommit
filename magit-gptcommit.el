@@ -105,8 +105,85 @@ p                          (when (equal (car status) :ok)
   :type 'integer
   :group 'magit-gptcommit)
 
-(defvar magit-gptcommit--commit-alist nil
-  "Alist of generated commit message.")
+
+;;; Cache
+(defvar magit-gptcommit--cache-limit 30
+  "Max number of cache entries."
+  )
+
+(defvar magit-gptcommit--cache nil
+  "Cache of generated commit message.")
+
+(cl-defun magit-gptcommit--cache-key (content &optional (repository (magit-repository-local-repository)))
+  "Return cache key for CONTENT and REPOSITORY."
+  ;; set repository to default if not initial
+  (md5 (format "%s%s" repository content)))
+
+(defun magit-gptcommit--cache-set (key value)
+  "Set cache VALUE for KEY."
+  (let ((cache magit-gptcommit--cache))
+    (if magit-gptcommit--cache
+        (let ((keyvalue (assoc key magit-gptcommit--cache)))
+          (if keyvalue
+              ;; Update pre-existing value for key.
+              (setcdr keyvalue value)
+            ;; No such key in repository-local cache.
+            ;; if cache is full, remove half of it
+            (when (>= (length magit-gptcommit--cache) magit-gptcommit--cache-limit)
+              (setf magit-gptcommit--cache
+                    (seq-take magit-gptcommit--cache (/ (length magit-gptcommit--cache) 2))))
+            ;; Add new key-value pair to cache.
+            (push (cons key value) magit-gptcommit--cache)))
+      ;; No cache
+      (push (cons key value)
+            magit-gptcommit--cache))))
+
+(defun magit-gptcommit--cache-get (key &optional default)
+  "Return cache value for KEY or DEFAULT if not found."
+  (if-let ((keyvalue (magit-gptcommit--cache-p key)))
+      (cdr keyvalue) ; TODO: LRU Cache
+    default))
+
+(defun magit-gptcommit--cache-p (key)
+  "Non-nil when a value exists for KEY.
+
+Return a (KEY . VALUE) cons cell.
+
+The KEY is matched using `equal'."
+  (and-let* ((cache magit-gptcommit--cache))
+    (assoc key cache)))
+
+
+;;; utils
+(defun magit-gptcommit-status-buffer-setup ()
+  "Setup gptcommit transient command in `magit-status-mode' buffer."
+  (interactive)
+  (transient-append-suffix 'magit-commit '(1 -1)
+    ["GPT Commit"
+     :if magit-anything-staged-p
+     ("G" "Generate" magit-gptcommit-generate)
+     ("Q" "Quick Accept" magit-gptcommit-commit-quick)
+     ("C" "Accept" magit-gptcommit-commit-create)
+     ]))
+
+;; credited: https://emacs.stackexchange.com/a/3339/30746
+(defmacro magit-gptcommit--add-hook-run-once (hook function &optional append local)
+  "Like add-hook, but remove the hook after it is called"
+  (let ((sym (make-symbol "#once")))
+    `(progn
+       (defun ,sym ()
+         (remove-hook ,hook ',sym ,local)
+         (funcall ,function))
+       (add-hook ,hook ',sym ,append ,local))))
+
+(defmacro magit-gptcommit--update-heading-status (status face)
+  "Update gptcommit section heading with STATUS and FACE."
+  `(progn
+    (goto-char (+ 12 start))
+    (delete-region (point) (point-at-eol))
+    (insert (propertize ,status 'font-lock-face ,face))
+    )
+  )
 
 (cl-defun magit-gptcommit--move-last-to-position (list position)
   "Move the last element of LIST to POSITION."
