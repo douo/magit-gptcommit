@@ -40,9 +40,15 @@
   "GPT generated commit message for current repository.")
 (defvar magit-gptcommit--active-section-list nil
   "List of active gptcommit sections for current repository.")
-(defvar magit-gptcommit--active-process nil
+(defvar magit-gptcommit--active-worker nil
   "Running gptcommit process for current repository.
 Stored as a cons cell (PROCESS . RESPONSE) where RESPONE is a SSO Message.")
+
+(cl-defstruct magit-gptcommit--worker
+  "Structure respesenting current active process."
+  key process message sections
+  )
+
 
 (defconst magit-gptcommit--prompt-one-line "You are an expert programmer writing a commit message.
 You went over every file diff that was changed in it.
