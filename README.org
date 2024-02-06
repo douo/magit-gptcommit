@@ -50,12 +50,13 @@ two way to setup a key:
 * Todo
 
 - [ ] Improve prompt for better usability
-  There is still a lot of room for optimization. One issue is the context limitation, for example, GPT3.5 can only handle 4k tokens and will explode if a file is submitted casually; currently, it is simply truncated roughly according to proportions. Another approach is similar to [[https://github.com/zurawiki/gptcommit][gptcommit]], summarizing each file once with diff and then integrating all the summaries to generate a commit. However, this method requires n + 2 requests to generate one message.
+  - There is still a lot of room for optimization. One issue is the context limitation, for example, GPT3.5 can only handle 4k tokens and will explode if a file is submitted casually; currently, it is simply truncated roughly according to proportions. Another approach is similar to [[https://github.com/zurawiki/gptcommit][gptcommit]], summarizing each file once with diff and then integrating all the summaries to generate a commit. However, this method requires n + 2 requests to generate one message.
 - [ ] LRU Cache or Disk Cache
 - [ ] NO Stream
 - [ ] Other LLM Support
 
 * Credit
 
+- [[https://github.com/karthink/gptel][gptel]] Great project.
 - [[https://github.com/zurawiki/gptcommit][gptcommit]] Very helpful, Prompt modified from this project.
 - [[https://github.com/alphapapa/magit-todos][magit-todos]] This project has been of great help to me in learning magit development.
