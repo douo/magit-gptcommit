@@ -643,4 +643,8 @@ ERROR-MSG is error message"
                     ('error
                      (magit-gptcommit--update-heading-status (format "Response Error: %s" error-msg) 'error))))))))))))
 
+;;;; Footer
+
+(provide 'magit-gptcommit)
+
 ;;; magit-gptcommit.el ends here
