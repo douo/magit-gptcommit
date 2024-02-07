@@ -334,7 +334,7 @@ Staged section position is determined by CONDITION which is defined in `magit-se
   (interactive)
   (when (magit-gptcommit--running-p)
     (magit-gptcommit-abort))
-  (magit-gptcommit-delete-section)
+  (magit-gptcommit-remove-section)
   (pcase (current-buffer)
     ((app (buffer-local-value 'major-mode) 'magit-status-mode)
      (magit-gptcommit--insert 'staged t))
