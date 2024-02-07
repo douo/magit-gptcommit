@@ -79,7 +79,6 @@ Setup example using [use-package](https://github.com/jwiegley/use-package) and [
 # Credit
 
 - [gptel](https://github.com/karthink/gptel) Great project.
-- [gptcommit](https://github.com/zurawiki/gptcommit) Very helpful,
-  Prompt modified from this project.
-- [magit-todos](https://github.com/alphapapa/magit-todos) This project
-  has been of great help to me in learning magit development.
+- [gptcommit](https://github.com/zurawiki/gptcommit) Very helpful, Prompt modified from this project.
+- [magit-todos](https://github.com/alphapapa/magit-todos) This project has been of great help to me in learning magit development.
+- [GPT-Commit](https://github.com/ywkim/gpt-commit): Another Emacs pacakge for a similar purpose.
