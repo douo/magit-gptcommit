@@ -5,7 +5,7 @@
 ;; Author: Tiou Lims <dourokinga@gmail.com>
 ;; URL: https://github.com/douo/magit-gptcommit
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "25.1") (magit "2.90.1") (gpt "0.1.0"))
+;; Package-Requires: ((emacs "29.1") (dash "2.13.0") (magit "2.13.0") (gptel "0.6.0"))
 
 ;;; Commentary:
 
@@ -33,11 +33,9 @@
         (magit-add-section-hook 'magit-status-sections-hook
                                 #'magit-gptcommit--status-insert-gptcommit
                                 nil
-                                'append)
-        )
+                                'append))
     ;; Disable mode
-    (remove-hook 'magit-status-sections-hook #'magit-gptcommit--status-insert-gptcommit))
-  )
+    (remove-hook 'magit-status-sections-hook #'magit-gptcommit--status-insert-gptcommit)))
 
 (defvar magit-gptcommit--last-message nil
   "GPT generated commit message for current repository.")
@@ -49,8 +47,7 @@ Stored as a cons cell (PROCESS . RESPONSE) where RESPONE is a SSO Message.")
 
 (cl-defstruct magit-gptcommit--worker
   "Structure respesenting current active process."
-  key process message sections
-  )
+  key process message sections)
 
 
 (defconst magit-gptcommit--prompt-one-line "You are an expert programmer writing a commit message.
@@ -111,8 +108,7 @@ Now write Commit message in follow template: [label]:[one line of summary] :
 
 ;;; Cache
 (defvar magit-gptcommit--cache-limit 30
-  "Max number of cache entries."
-  )
+  "Max number of cache entries.")
 
 (defvar magit-gptcommit--cache nil
   "Cache of generated commit message.")
@@ -184,9 +180,7 @@ The KEY is matched using `equal'."
   `(progn
     (goto-char (+ 12 start))
     (delete-region (point) (point-at-eol))
-    (insert (propertize ,status 'font-lock-face ,face))
-    )
-  )
+    (insert (propertize ,status 'font-lock-face ,face))))
 
 (cl-defun magit-gptcommit--move-last-to-position (list position)
   "Move the last element of LIST to POSITION."
@@ -196,16 +190,14 @@ The KEY is matched using `equal'."
   "Return end position of section after which to insert the commit message.
 Position is determined by CONDITION, which is defined in `magit-section-match'."
   (let ((children (oref magit-root-section children))
-        (pos 0)
-        )
+        (pos 0))
     ;; iterate over all children
     (cl-loop for child in children
              ;; find the first child that matches the condition
              if (or (null condition)
                     (magit-section-match condition child))
              return (goto-char (identity (oref child start)))
-             do (cl-incf pos)  ;; index after target section
-             )
+             do (cl-incf pos))  ;; index after target section
     (when (< pos (length children))
       pos)))
 
@@ -219,12 +211,10 @@ SECTION is determined by CONDITION, which is defined in `magit-section-match'."
                           ;; find the first child that matches the condition
                           if (or (null condition)
                                  (magit-section-match condition child))
-                          return child
-                          ))
+                          return child))
     (when target
       (goto-char (oref target start))
       target)))
-
 
 (defun magit-gptcommit--retrieve-stashed-diff ()
   "Retrieve stashed diff.
@@ -264,8 +254,7 @@ assuming current section is staged section."
 
 (defun magit-gptcommit--status-insert-gptcommit ()
   "Insert gptcommit section into status buffer."
-  (magit-gptcommit--insert 'staged)
-  )
+  (magit-gptcommit--insert 'staged))
 
 (defun magit-gptcommit--insert (condition &optional no-cache)
   "Insert gptcommit section above staged section in magit buffer.
@@ -321,8 +310,7 @@ Staged section position is determined by CONDITION which is defined in `magit-se
             (oset worker sections
                   (cons (cons buf section)
                         (oref worker sections))))
-          (setq-local magit-inhibit-refresh t)
-          ))
+          (setq-local magit-inhibit-refresh t)))
       ;; move section to correct position
       (oset magit-root-section children
             (magit-gptcommit--move-last-to-position
@@ -338,10 +326,8 @@ Staged section position is determined by CONDITION which is defined in `magit-se
   (pcase (current-buffer)
     ((app (buffer-local-value 'major-mode) 'magit-status-mode)
      (magit-gptcommit--insert 'staged t))
-    ((app (buffer-local-value 'major-mode) 'magit-diff-mode)
-     ) ; TODO
-    ((pred (buffer-local-value 'with-editor-mode))
-     ) ; TODO
+    ((app (buffer-local-value 'major-mode) 'magit-diff-mode)) ; TODO
+    ((pred (buffer-local-value 'with-editor-mode))) ; TODO
     (_ (user-error "Not in a magit status buffer or with-editor buffer"))))
 
 (cl-defun magit-gptcommit-abort (&optional (repository (magit-repository-local-repository)))
@@ -364,8 +350,7 @@ Staged section position is determined by CONDITION which is defined in `magit-se
           (set-process-sentinel proc #'ignore)
           (delete-process proc)
           (kill-buffer (process-buffer proc)))))
-    (magit-repository-local-delete 'magit-gptcommit--active-worker repository)
-    ))
+    (magit-repository-local-delete 'magit-gptcommit--active-worker repository)))
 
 (defun magit-gptcommit-remove-section ()
   "Remove gptcommit SECTION from magit buffer if exist."
@@ -405,8 +390,7 @@ Staged section position is determined by CONDITION which is defined in `magit-se
   (interactive)
   (let ((hook #'magit-gptcommit-commit-accept))
     (magit-gptcommit--add-hook-run-once 'git-commit-setup-hook hook)
-    (magit-commit-create)
-    ))
+    (magit-commit-create)))
 
 
 (defun magit-gptcommit-commit-quick ()
@@ -414,8 +398,7 @@ Staged section position is determined by CONDITION which is defined in `magit-se
   (interactive)
   (if-let ((message (magit-repository-local-get 'magit-gptcommit--last-message)))
       (magit-run-git "commit" "-m" message)
-    (user-error "No last gptcommit message found")
-    ))
+    (user-error "No last gptcommit message found")))
 
 ;;;; gptel
 ;;;;; modified from `gptel-curl-get-response'
@@ -506,8 +489,7 @@ PROCESS and _STATUS are process parameters."
               ;;                                  (insert "\n\n" (gptel-prompt-prefix-string))))
               )
             (with-current-buffer gptel-buffer
-              (magit-gptcommit--stream-update-status 'success info)
-              ))
+              (magit-gptcommit--stream-update-status 'success info)))
         ;; Or Capture error message
         (with-current-buffer proc-buf
           (goto-char (point-max))
@@ -532,8 +514,7 @@ PROCESS and _STATUS are process parameters."
              (t (message "ChatGPT error (%s): Could not parse HTTP response." http-msg)))))
         (with-current-buffer gptel-buffer
           ;; tell callback error occurred
-          (magit-gptcommit--stream-update-status 'error info http-msg)
-          ))
+          (magit-gptcommit--stream-update-status 'error info http-msg)))
       (with-current-buffer gptel-buffer
         (run-hook-with-args 'gptel-post-response-functions response-beg response-end)
         (setq-local magit-inhibit-refresh nil)))
@@ -579,8 +560,7 @@ PROCESS and _STATUS are process parameters."
           (funcall (or (plist-get proc-info :callback)
                        #'gptel-curl--stream-insert-response)
                    response proc-info)
-          (magit-gptcommit--stream-update-status 'typing proc-info)
-          )))))
+          (magit-gptcommit--stream-update-status 'typing proc-info))))))
 
 (defun magit-gptcommit--stream-insert-response (msg info)
   "Insert response in target section located by CONDITION.
@@ -642,5 +622,9 @@ ERROR-MSG is error message"
                      (put-text-property content end 'keymap (get-text-property start 'keymap)))
                     ('error
                      (magit-gptcommit--update-heading-status (format "Response Error: %s" error-msg) 'error))))))))))))
+
+;;;; Footer
+
+(provide 'magit-gptcommit)
 
 ;;; magit-gptcommit.el ends here
