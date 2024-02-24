@@ -18,10 +18,9 @@ Please read the
 of gptel for more configuration details and provide the method to
 configure OpenAI here.
 
-Procure an [OpenAI API
-key](https://platform.openai.com/account/api-keys).
+Procure an [OpenAI API key](https://platform.openai.com/account/api-keys).
 
-two way to setup a key:
+Setup a key:
 
 - Recommend: Storing in ~/.authinfo. By default, “api.openai.com” is
   used as HOST and “apikey” as USER.
@@ -29,6 +28,28 @@ two way to setup a key:
       machine api.openai.com login apikey password TOKEN
 
 - Another: Set `gptel-api-key` to the key.
+
+Activate `magit-gptcommit-mode`. Then open a Magit status buffer, Commit message will automatically generated when staged changed. or run `magit-gptcommit-generate'` to generate message manually.
+
+Setup example using [use-package](https://github.com/jwiegley/use-package) and [straight](https://github.com/radian-software/straight.el)
+
+``` emacs-lisp
+(use-package magit-gptcommit
+  :straight `(magit-gptcommit :type git :host github :repo "douo/magit-gptcommit")
+  :demand t
+  :after gptel magit
+  :config
+  ;; Enable magit-gptcommit-mode to watch staged changes and generate commit message automatically in magit status buffer
+  ;; This mode is optional, you can also use `magit-gptcommit-generate' to generate commit message manually
+  ;; `magit-gptcommit-generate' should only execute on magit status buffer currently
+  (magit-gptcommit-mode 1)
+  ;; Add gptcommit transient commands to `magit-commit'
+  ;; Eval (transient-remove-suffix 'magit-commit '(1 -1)) to remove gptcommit transient commands
+  (magit-gptcommit-status-buffer-setup)
+  :bind (:map git-commit-mode-map
+              ("C-c C-g" . magit-gptcommit-commit-accept))
+  )
+```
 
 # Usage
 
@@ -50,15 +71,9 @@ two way to setup a key:
 
 # Todo
 
-- [ ] Improve prompt for better usability
-  - There is still a lot of room for optimization. One issue is the
-    context limitation, for example, GPT3.5 can only handle 4k tokens
-    and will explode if a file is submitted casually; currently, it is
-    simply truncated roughly according to proportions. Another approach
-    is similar to [gptcommit](https://github.com/zurawiki/gptcommit),
-    summarizing each file once with diff and then integrating all the
-    summaries to generate a commit. However, this method requires n + 2
-    requests to generate one message.
+- [ ] Prompt optimization
+  - There is still a lot of room for optimization. One problem is the context limitation, for example, GPT3.5 has a 4k context limit, so making a slightly larger edit will exceed the limit. Currently, the code roughly truncates the edit based on proportions to avoid this problem.
+  - Alternatively, we could use a method similar to [gptcommit](https://github.com/zurawiki/gptcommit). This method summarizes the diff of each file and then merges all the summaries to generate the commit message. However, this approach requires n + 2 requests to generate a single message.
 - [ ] LRU Cache or Disk Cache
 - [ ] NO Stream
 - [ ] Other LLM Support
@@ -66,7 +81,6 @@ two way to setup a key:
 # Credit
 
 - [gptel](https://github.com/karthink/gptel) Great project.
-- [gptcommit](https://github.com/zurawiki/gptcommit) Very helpful,
-  Prompt modified from this project.
-- [magit-todos](https://github.com/alphapapa/magit-todos) This project
-  has been of great help to me in learning magit development.
+- [gptcommit](https://github.com/zurawiki/gptcommit) Very helpful, Prompt modified from this project.
+- [magit-todos](https://github.com/alphapapa/magit-todos) This project has been of great help to me in learning magit development.
+- [GPT-Commit](https://github.com/ywkim/gpt-commit): Another Emacs pacakge for a similar purpose.
