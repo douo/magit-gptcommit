@@ -5,7 +5,7 @@
 ;; Author: Tiou Lims <dourokinga@gmail.com>
 ;; URL: https://github.com/douo/magit-gptcommit
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (dash "2.13.0") (magit "2.13.0") (gptel "0.6.0"))
+;; Package-Requires: ((emacs "29.1") (dash "2.13.0") (magit "2.90.1") (gptel "0.6.0"))
 
 ;;; Commentary:
 
@@ -83,22 +83,23 @@ Now write Commit message in follow template: [label]:[one line of summary] :
   :type 'string
   :group 'magit-gptcommit)
 
-(defun magit-gptcommit-load-prompt ()
-  (let* ((directory (expand-file-name "assets/magit-gptcommit/" user-emacs-directory))
-         (file-path (expand-file-name "prompt.txt" directory))
-         (url "https://example.com/prompt.txt"))
-    (unless (file-exists-p directory)
-      (make-directory directory t))
-    (if (file-exists-p file-path)
-        (with-temp-buffer
-          (insert-file-contents file-path)
-          (setq magit-gptcommit--prompt (buffer-string)))
-      ;; TODO download from url
-      (url-retrieve url (lambda (status)
-                          (when (equal (car status) :ok)
-                            (with-temp-buffer (url-retrieve-sentinel (current-buffer))
-                                              (write-region (point-min) (point-max) file-path)
-                                              (setq magit-gptcommit--prompt (buffer-string)))))))))
+;; (defun magit-gptcommit-load-prompt ()
+;;   "Load prompt from file or download from url."
+;;   (let* ((directory (expand-file-name "assets/magit-gptcommit/" user-emacs-directory))
+;;          (file-path (expand-file-name "prompt.txt" directory))
+;;          (url "https://example.com/prompt.txt"))
+;;     (unless (file-exists-p directory)
+;;       (make-directory directory t))
+;;     (if (file-exists-p file-path)
+;;         (with-temp-buffer
+;;           (insert-file-contents file-path)
+;;           (setq magit-gptcommit--prompt (buffer-string)))
+;;       ;; TODO download from url
+;;       (url-retrieve url (lambda (status)
+;;                           (when (equal (car status) :ok)
+;;                             (with-temp-buffer (url-retrieve-sentinel (current-buffer))
+;;                                               (write-region (point-min) (point-max) file-path)
+;;                                               (setq magit-gptcommit--prompt (buffer-string)))))))))
 
 (defcustom magit-gptcommit--max-token 4096
   "Max token length."
@@ -121,21 +122,21 @@ Now write Commit message in follow template: [label]:[one line of summary] :
 (defun magit-gptcommit--cache-set (key value)
   "Set cache VALUE for KEY."
   (let ((cache magit-gptcommit--cache))
-    (if magit-gptcommit--cache
-        (let ((keyvalue (assoc key magit-gptcommit--cache)))
+    (if cache
+        (let ((keyvalue (assoc key cache)))
           (if keyvalue
               ;; Update pre-existing value for key.
               (setcdr keyvalue value)
             ;; No such key in repository-local cache.
             ;; if cache is full, remove half of it
-            (when (>= (length magit-gptcommit--cache) magit-gptcommit--cache-limit)
-              (setf magit-gptcommit--cache
-                    (seq-take magit-gptcommit--cache (/ (length magit-gptcommit--cache) 2))))
+            (when (>= (length cache) magit-gptcommit--cache-limit)
+              (setf cache
+                    (seq-take cache (/ (length cache) 2))))
             ;; Add new key-value pair to cache.
-            (push (cons key value) magit-gptcommit--cache)))
+            (push (cons key value) cache)))
       ;; No cache
       (push (cons key value)
-            magit-gptcommit--cache))))
+            cache))))
 
 (defun magit-gptcommit--cache-get (key &optional default)
   "Return cache value for KEY or DEFAULT if not found."
@@ -167,7 +168,8 @@ The KEY is matched using `equal'."
 
 ;; credited: https://emacs.stackexchange.com/a/3339/30746
 (defmacro magit-gptcommit--add-hook-run-once (hook function &optional append local)
-  "Like add-hook, but remove the hook after it is called"
+  "Like `add-hook', but remove the HOOK after FUNCTION is called.
+APPEND and LOCAL have the same meaning as in `add-hook'."
   (let ((sym (make-symbol "#once")))
     `(progn
        (defun ,sym ()
@@ -179,7 +181,7 @@ The KEY is matched using `equal'."
   "Update gptcommit section heading with STATUS and FACE."
   `(progn
     (goto-char (+ 12 start))
-    (delete-region (point) (point-at-eol))
+    (delete-region (point) (pos-eol))
     (insert (propertize ,status 'font-lock-face ,face))))
 
 (cl-defun magit-gptcommit--move-last-to-position (list position)
@@ -215,6 +217,7 @@ SECTION is determined by CONDITION, which is defined in `magit-section-match'."
     (when target
       (goto-char (oref target start))
       target)))
+
 
 (defun magit-gptcommit--retrieve-stashed-diff ()
   "Retrieve stashed diff.
@@ -257,8 +260,10 @@ assuming current section is staged section."
   (magit-gptcommit--insert 'staged))
 
 (defun magit-gptcommit--insert (condition &optional no-cache)
-  "Insert gptcommit section above staged section in magit buffer.
-Staged section position is determined by CONDITION which is defined in `magit-section-match'."
+  "Insert gptcommit section above staged section.
+Staged section position is determined by CONDITION,
+which is defined in `magit-section-match'.
+NO-CACHE is non-nil if cache should be ignored."
   (save-excursion
     (when-let ((buf (current-buffer))
                ;; 存在 staged 才自动生成
@@ -405,6 +410,8 @@ Staged section position is determined by CONDITION which is defined in `magit-se
 (defun magit-gptcommit-gptel-get-response (key info callback)
   "Retrieve response to prompt in INFO.
 
+KEY is a unique identifier for the worker.
+
 INFO is a plist with the following keys:
 - :prompt (the prompt being sent)
 - :buffer (the gptel buffer)
@@ -476,7 +483,7 @@ PROCESS and _STATUS are process parameters."
            (start-marker (plist-get info :position))
            (http-status (plist-get info :http-status))
            (http-msg (plist-get info :status))
-           (callback (plist-get info :callback))
+           ;; (callback (plist-get info :callback))
            response-beg response-end)
       (if (equal http-status "200")
           (progn
@@ -484,12 +491,11 @@ PROCESS and _STATUS are process parameters."
             (with-current-buffer (marker-buffer start-marker)
               (setq response-beg (+ start-marker 2)
                     response-end (marker-position tracking-marker))
-              (pulse-momentary-highlight-region response-beg tracking-marker)
+              (pulse-momentary-highlight-region response-beg tracking-marker))
               ;; (when gptel-mode (save-excursion (goto-char tracking-marker)
               ;;                                  (insert "\n\n" (gptel-prompt-prefix-string))))
-              )
             (with-current-buffer gptel-buffer
-              (magit-gptcommit--stream-update-status 'success info)))
+              (magit-gptcommit--stream-update-status 'success)))
         ;; Or Capture error message
         (with-current-buffer proc-buf
           (goto-char (point-max))
@@ -514,7 +520,7 @@ PROCESS and _STATUS are process parameters."
              (t (message "ChatGPT error (%s): Could not parse HTTP response." http-msg)))))
         (with-current-buffer gptel-buffer
           ;; tell callback error occurred
-          (magit-gptcommit--stream-update-status 'error info http-msg)))
+          (magit-gptcommit--stream-update-status 'error http-msg)))
       (with-current-buffer gptel-buffer
         (run-hook-with-args 'gptel-post-response-functions response-beg response-end)
         (setq-local magit-inhibit-refresh nil)))
@@ -524,6 +530,8 @@ PROCESS and _STATUS are process parameters."
     (kill-buffer proc-buf)))
 
 (defun magit-gptcommit--stream-filter (process output)
+  "Process filter for GPTel curl requests.
+OUTPUT is the PROCESS stdout."
   (let* ((proc-info (alist-get process gptel-curl--process-alist)))
     (with-current-buffer (process-buffer process)
       ;; Insert output
@@ -560,7 +568,7 @@ PROCESS and _STATUS are process parameters."
           (funcall (or (plist-get proc-info :callback)
                        #'gptel-curl--stream-insert-response)
                    response proc-info)
-          (magit-gptcommit--stream-update-status 'typing proc-info))))))
+          (magit-gptcommit--stream-update-status 'typing))))))
 
 (defun magit-gptcommit--stream-insert-response (msg info)
   "Insert response in target section located by CONDITION.
@@ -589,16 +597,14 @@ INFO is gptel metadata"
                       ;; (set-marker-insertion-type tracking-marker t)
                       (plist-put info :tracking-marker tracking-marker)))))))))))
 
-(cl-defun magit-gptcommit--stream-update-status (status info &optional (error-msg))
+(cl-defun magit-gptcommit--stream-update-status (status &optional (error-msg))
   "Update status of gptcommit section.
 
-STATUS is one of 'success, 'error
+STATUS is one of `success', `error'
 INFO is gptel metadata
 ERROR-MSG is error message"
   ;; (message "magit-gptcommit--stream-update-status %s" status)
-  (let* ((worker-buf (plist-get info :buffer))
-        (worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-        (tmp-message (oref worker message))
+  (let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
         (sections (oref worker sections)))
     (dolist (pair sections)
       (-let (((buf . section) pair))
