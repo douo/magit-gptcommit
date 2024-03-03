@@ -7,6 +7,8 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1") (dash "2.13.0") (magit "2.90.1") (gptel "0.6.0"))
 
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
 ;;; Commentary:
 
 ;; This package provides a way to commit with help of gpt.
@@ -78,7 +80,7 @@ THE FILE DIFFS:
 Now write Commit message in follow template: [label]:[one line of summary] :
 ")
 
-(defcustom magit-gptcommit--prompt magit-gptcommit--prompt-one-line
+(defcustom magit-gptcommit-prompt magit-gptcommit--prompt-one-line
   "The prompt that was used to generate the commit message."
   :type 'string
   :group 'magit-gptcommit)
@@ -93,15 +95,15 @@ Now write Commit message in follow template: [label]:[one line of summary] :
 ;;     (if (file-exists-p file-path)
 ;;         (with-temp-buffer
 ;;           (insert-file-contents file-path)
-;;           (setq magit-gptcommit--prompt (buffer-string)))
+;;           (setq magit-gptcommit-prompt (buffer-string)))
 ;;       ;; TODO download from url
 ;;       (url-retrieve url (lambda (status)
 ;;                           (when (equal (car status) :ok)
 ;;                             (with-temp-buffer (url-retrieve-sentinel (current-buffer))
 ;;                                               (write-region (point-min) (point-max) file-path)
-;;                                               (setq magit-gptcommit--prompt (buffer-string)))))))))
+;;                                               (setq magit-gptcommit-prompt (buffer-string)))))))))
 
-(defcustom magit-gptcommit--max-token 4096
+(defcustom magit-gptcommit-max-token 4096
   "Max token length."
   :type 'integer
   :group 'magit-gptcommit)
@@ -224,7 +226,7 @@ SECTION is determined by CONDITION, which is defined in `magit-section-match'."
 assuming current section is staged section."
   (let* ((section (magit-current-section))
          ;; HACK:  1 token ~= 4 chars
-         (max-char (- (* 4 magit-gptcommit--max-token) (length magit-gptcommit--prompt)))
+         (max-char (- (* 4 magit-gptcommit-max-token) (length magit-gptcommit-prompt)))
          (diffs (mapcar
                  (lambda (child)
                    (with-slots (start end) child
@@ -305,7 +307,7 @@ NO-CACHE is non-nil if cache should be ignored."
               (insert "\n")
               (magit-gptcommit-gptel-get-response
                key
-               (list :prompt (list (list :role "user" :content (format magit-gptcommit--prompt diff)))
+               (list :prompt (list (list :role "user" :content (format magit-gptcommit-prompt diff)))
                      :buffer buf
                      :position (point-marker))
                #'magit-gptcommit--stream-insert-response)))
