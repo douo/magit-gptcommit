@@ -428,7 +428,7 @@ the response is inserted into the current buffer after point."
          (stream (and gptel-stream (gptel-backend-stream gptel-backend)))
          (process (apply #'start-process "gptel-curl"
                          (generate-new-buffer "*gptel-curl*") "curl" args)))
-    (when gptel--debug
+    (when (eq gptel-log-level 'debug)
       (message "%S" args))
     ;; store process in repository-local variable
     (magit-repository-local-set 'magit-gptcommit--active-worker
@@ -473,7 +473,7 @@ the response is inserted into the current buffer after point."
 
 PROCESS and _STATUS are process parameters."
   (let ((proc-buf (process-buffer process)))
-    (when gptel--debug
+    (when (eq gptel-log-level 'debug)
       (with-current-buffer proc-buf
         (clone-buffer "*gptel-error*" 'show)))
     (let* ((info (alist-get process gptel-curl--process-alist))
