@@ -52,7 +52,7 @@ Stored as a cons cell (PROCESS . RESPONSE) where RESPONE is a SSO Message.")
   key process message sections)
 
 
-(defconst magit-gptcommit--prompt-one-line "You are an expert programmer writing a commit message.
+(defconst magit-gptcommit-prompt-one-line "You are an expert programmer writing a commit message.
 You went over every file diff that was changed in it.
 
 First Determine the best label for the diffs.
@@ -80,7 +80,7 @@ THE FILE DIFFS:
 Now write Commit message in follow template: [label]:[one line of summary] :
 ")
 
-(defcustom magit-gptcommit-prompt magit-gptcommit--prompt-one-line
+(defcustom magit-gptcommit-prompt magit-gptcommit-prompt-one-line
   "The prompt that was used to generate the commit message."
   :type 'string
   :group 'magit-gptcommit)
@@ -110,7 +110,7 @@ Now write Commit message in follow template: [label]:[one line of summary] :
 
 
 ;;; Cache
-(defvar magit-gptcommit--cache-limit 30
+(defvar magit-gptcommit-cache-limit 30
   "Max number of cache entries.")
 
 (defvar magit-gptcommit--cache nil
@@ -131,7 +131,7 @@ Now write Commit message in follow template: [label]:[one line of summary] :
               (setcdr keyvalue value)
             ;; No such key in repository-local cache.
             ;; if cache is full, remove half of it
-            (when (>= (length cache) magit-gptcommit--cache-limit)
+            (when (>= (length cache) magit-gptcommit-cache-limit)
               (setf cache
                     (seq-take cache (/ (length cache) 2))))
             ;; Add new key-value pair to cache.
