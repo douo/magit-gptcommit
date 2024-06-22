@@ -5,7 +5,7 @@
 ;; Author: Tiou Lims <dourokinga@gmail.com>
 ;; URL: https://github.com/douo/magit-gptcommit
 ;; Version: 0.2.0
-;; Package-Requires: ((emacs "29.1") (dash "2.13.0") (magit "2.90.1") (llm "0.14.1"))
+;; Package-Requires: ((emacs "29.1") (dash "2.13.0") (magit "2.90.1") (llm "0.16.1"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -48,7 +48,7 @@
 Stored as a cons cell (PROCESS . RESPONSE) where RESPONE is a SSO Message.")
 
 (cl-defstruct magit-gptcommit--worker
-  "Structure respesenting current active process."
+  "Structure respesenting current active llm request."
   key llm-request message sections)
 
 (defconst magit-gptcommit-prompt-one-line "You are an expert programmer writing a commit message.
@@ -107,6 +107,14 @@ Now write Commit message in follow template: [label]:[one line of summary] :
   :type 'integer
   :group 'magit-gptcommit)
 
+(defcustom magit-gptcommit-determine-max-token nil
+  "Whether to determine the max token for the llm provider.
+
+Max tokens set by the llm provider are used only if `magit-gptcommit-max-token'
+is nil."
+  :type 'boolean
+  :group 'magit-gptcommit)
+
 (defcustom magit-gptcommit-llm-provider nil
   "llm provider to use"
   :type '(choice
@@ -117,6 +125,11 @@ Now write Commit message in follow template: [label]:[one line of summary] :
 (defcustom magit-gptcommit-llm-provider-temperature nil
   "llm provider temperature."
   :type 'float
+  :group 'magit-gptcommit)
+
+(defcustom magit-gptcommit-llm-provider-max-tokens nil
+  "llm provider max tokens to generate."
+  :type 'integer
   :group 'magit-gptcommit)
 
 ;;; Cache
@@ -192,9 +205,9 @@ APPEND and LOCAL have the same meaning as in `add-hook'."
 (defmacro magit-gptcommit--update-heading-status (status face)
   "Update gptcommit section heading with STATUS and FACE."
   `(progn
-    (goto-char (+ 12 start))
-    (delete-region (point) (pos-eol))
-    (insert (propertize ,status 'font-lock-face ,face))))
+     (goto-char (+ 12 start))
+     (delete-region (point) (pos-eol))
+     (insert (propertize ,status 'font-lock-face ,face))))
 
 (cl-defun magit-gptcommit--move-last-to-position (list position)
   "Move the last element of LIST to POSITION."
@@ -231,12 +244,14 @@ SECTION is determined by CONDITION, which is defined in `magit-section-match'."
       target)))
 
 
-(defun magit-gptcommit--retrieve-stashed-diff ()
-  "Retrieve stashed diff.
-assuming current section is staged section."
+(defun magit-gptcommit--retrieve-staged-diff ()
+  "Retrieve staged diff assuming current magit section is the staged section."
   (let* ((section (magit-current-section))
+         (max-token (if (and magit-gptcommit-determine-max-token (not magit-gptcommit-max-token))
+                        (llm-chat-token-limit (magit-gptcommit--llm-provider))
+                      magit-gptcommit-max-token))
          ;; HACK:  1 token ~= 4 chars
-         (max-char (- (* 4 magit-gptcommit-max-token) (length magit-gptcommit-prompt)))
+         (max-char (- (* 4 max-token) (length magit-gptcommit-prompt)))
          (diffs (mapcar
                  (lambda (child)
                    (with-slots (start end) child
@@ -269,16 +284,18 @@ assuming current section is staged section."
 Staged section position is determined by CONDITION,
 which is defined in `magit-section-match'.
 NO-CACHE is non-nil if cache should be ignored."
+  (if (not magit-gptcommit-llm-provider)
+      (error "No llm provider, please configure `magit-gptcommit-llm-provider'."))
   (save-excursion
     (when-let ((buf (current-buffer))
-               ;; 存在 staged 才自动生成
+               ;; generated if staged section exists
                ;; TODO: magit-anything-staged-p
                (pos (magit-gptcommit--goto-target-position condition))
                (inhibit-read-only t)
                (magit-insert-section--parent magit-root-section))
 
       (magit-repository-local-delete 'magit-gptcommit--last-message)
-      (let* ((diff (magit-gptcommit--retrieve-stashed-diff))
+      (let* ((diff (magit-gptcommit--retrieve-staged-diff))
              (key (magit-gptcommit--cache-key diff))
              (worker (magit-repository-local-get 'magit-gptcommit--active-worker))
              (oldkey (and worker (oref worker key))))
@@ -307,13 +324,18 @@ NO-CACHE is non-nil if cache should be ignored."
                   (insert "\n"))
               (when worker
                 (magit-gptcommit-abort))
-              (insert "\n")
-              (magit-gptcommit--llm-chat-streaming
-               key
-               (list :prompt (format magit-gptcommit-prompt diff)
-                     :buffer buf
-                     :position (point-marker))
-               #'magit-gptcommit--stream-insert-response)))
+              (let ((start-position (point-marker))
+                    (tracking-marker (point-marker)))
+                (set-marker-insertion-type start-position nil)
+                (set-marker-insertion-type tracking-marker t)
+                (insert "\n")
+                (magit-gptcommit--llm-chat-streaming
+                 key
+                 (list :prompt (format magit-gptcommit-prompt diff)
+                       :buffer buf
+                       :position start-position
+                       :tracking-marker tracking-marker)
+                 #'magit-gptcommit--stream-insert-response))))
           ;; store section in repository-local active worker
           (let ((section (car (last (oref magit-root-section children))))
                 (worker (magit-repository-local-get 'magit-gptcommit--active-worker)))
@@ -332,9 +354,9 @@ NO-CACHE is non-nil if cache should be ignored."
   (interactive)
   (when (magit-gptcommit--running-p)
     (magit-gptcommit-abort))
-  (magit-gptcommit-remove-section)
   (pcase (current-buffer)
     ((app (buffer-local-value 'major-mode) 'magit-status-mode)
+     (magit-gptcommit-remove-section)
      (magit-gptcommit--insert 'staged t))
     ((app (buffer-local-value 'major-mode) 'magit-diff-mode)) ; TODO
     ((pred (buffer-local-value 'with-editor-mode))) ; TODO
@@ -403,15 +425,17 @@ NO-CACHE is non-nil if cache should be ignored."
 ;;;; response handling
 
 (defun magit-gptcommit--stream-insert-response (msg info)
-  "Insert response in target section located by CONDITION.
-MSG the response
-INFO is request metadata"
+  "Insert prompt response.
+
+MSG is the response.
+INFO is the request metadata."
   (let* ((worker-buf (plist-get info :buffer))
-         (tracking-marker (plist-get info :tracking-marker)) ; dupilicate with section end
+         (start-position (plist-get info :position))
+         (tracking-marker (plist-get info :tracking-marker))
          (worker (magit-repository-local-get 'magit-gptcommit--active-worker))
          (tmp-message (oref worker message))
          (sections (oref worker sections)))
-    (oset worker message (concat tmp-message msg))
+    (oset worker message msg)
     (dolist (pair sections)
       (-let (((buf . section) pair))
         (when (buffer-live-p buf)
@@ -420,24 +444,20 @@ INFO is request metadata"
               (let ((inhibit-read-only t)
                     (magit-insert-section--parent magit-root-section))
                 (with-slots (start content end) section
-                  ;; update heading
                   (magit-gptcommit--update-heading-status "Typing..." 'success)
-                  (goto-char  (1- end)) ;; before \newline
-                  (insert msg)
-                  (when (eq worker-buf buf)
-                    (setq tracking-marker end)
-                    ;; (set-marker-insertion-type tracking-marker t)
-                    (plist-put info :tracking-marker tracking-marker)))))))))))
+                  (delete-region start-position tracking-marker)
+                  (goto-char start-position)
+                  (insert (format "%s\n\n" msg))
+                  (setq end tracking-marker))))))))))
 
 (cl-defun magit-gptcommit--stream-update-status (status &optional (error-msg))
   "Update status of gptcommit section.
 
-STATUS is one of `success', `error'
-INFO is request metadata
-ERROR-MSG is error message"
+STATUS is one of `success', `error'.
+ERROR-MSG is error message."
   ;; (message "magit-gptcommit--stream-update-status %s" status)
   (let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-        (sections (oref worker sections)))
+         (sections (oref worker sections)))
     (dolist (pair sections)
       (-let (((buf . section) pair))
         (when (buffer-live-p buf)
@@ -464,36 +484,68 @@ ERROR-MSG is error message"
 ;;;; llm
 
 (defun magit-gptcommit--llm-provider ()
+  "Return llm provider stored in `magit-gptcommit-llm-provider'.
+
+If `magit-gptcommit-llm-provider' is a function, call it without arguments.
+Otherwise, return the stored value."
   (if (functionp magit-gptcommit-llm-provider)
       (funcall magit-gptcommit-llm-provider)
     magit-gptcommit-llm-provider))
 
-(defun magit-gptcommit--llm-chat-finalize-callback (info)
+(defun magit-gptcommit--llm-get-partial-callback (info callback)
+  "Return parial callback for llm streaming responses.
+
+INFO is the request metadata.
+Calls CALLBACK with the prompt response and INFO to update the response."
+  (lambda (response)
+    (funcall callback response info)))
+
+(defun magit-gptcommit--llm-get-response-callback (info callback)
+  "Return response callback for llm.
+
+INFO is the request metadata.
+Calls CALLBACK with the prompt response and INFO to update the response."
+  (lambda (response)
+    (condition-case nil
+        (progn
+          (funcall callback response info)
+          (let ((start-position (marker-position (plist-get info :position)))
+                (tracking-marker (marker-position (plist-get info :tracking-marker))))
+            (pulse-momentary-highlight-region start-position tracking-marker))
+          (magit-gptcommit--stream-update-status 'success)))
+    (magit-gptcommit--llm-finalize)))
+
+(defun magit-gptcommit--llm-error-callback (err msg)
+  "The error callback for llm."
+  (condition-case nil
+      (magit-gptcommit--stream-update-status 'error msg))
+  (magit-gptcommit--llm-finalize))
+
+(defun magit-gptcommit--llm-finalize ()
+  "Finalize llm prompt response."
   (setq-local magit-inhibit-refresh nil)
   (magit-repository-local-delete 'magit-gptcommit--active-worker))
 
 (defun magit-gptcommit--llm-chat-streaming (key info callback)
+  "Retrieve response to prompt in INFO.
+
+KEY is a unique identifier for the request.
+
+INFO is a plist with the following keys:
+- :prompt (the prompt being sent)
+- :buffer (the magit buffer)
+- :position (marker at which to insert the response).
+- :tracking-marker (a marker that tracks the end of the inserted response text).
+
+Call CALLBACK with the response and INFO with partial and full responses."
   (let* ((prompt (plist-get info :prompt))
          (buffer (plist-get info :buffer))
          (llm-provider (magit-gptcommit--llm-provider))
-         (partial-callback 'ignore)
+         (partial-callback
+          (magit-gptcommit--llm-get-partial-callback info callback))
          (response-callback
-          (lambda (response)
-            (condition-case nil
-                (progn
-                  (funcall callback response info)
-                  (magit-gptcommit--stream-update-status 'success)
-                  (let ((start-position (plist-get info :position))
-                        (tracking-marker (plist-get info :tracking-marker)))
-                    (pulse-momentary-highlight-region start-position tracking-marker))))
-            (magit-gptcommit--llm-chat-finalize-callback info)))
-         (error-callback
-          (lambda (err)
-            (condition-case nil
-                (progn
-                  ;; (message (format "ERROR-CALLBACK: %s" err))
-                  (magit-gptcommit--stream-update-status 'error err)))
-            (magit-gptcommit--llm-chat-finalize-callback info))))
+          (magit-gptcommit--llm-get-response-callback info callback))
+         (error-callback #'magit-gptcommit--llm-error-callback))
 
     (magit-repository-local-set
      'magit-gptcommit--active-worker
@@ -501,11 +553,10 @@ ERROR-MSG is error message"
       :key key
       :llm-request (llm-chat-streaming
                     llm-provider
-                    (make-llm-chat-prompt
-                     :interactions
-                     (list (make-llm-chat-prompt-interaction
-                            :role 'user :content prompt))
-                     :temperature magit-gptcommit-llm-provider-temperature)
+                    (llm-make-chat-prompt
+                     prompt
+                     :temperature magit-gptcommit-llm-provider-temperature
+                     :max-tokens magit-gptcommit-llm-provider-max-tokens)
                     partial-callback
                     response-callback
                     error-callback)))))
