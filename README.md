@@ -14,6 +14,10 @@ https://github.com/douo/magit-gptcommit/assets/743074/8494b235-aa1a-4404-82e3-0a
 
 # Setup
 
+> [!NOTE]
+> If you are using [gptel](https://github.com/karthink/gptel) as a backend, please check out this branch: [gptel](https://github.com/douo/magit-gptcommit/tree/gptel)
+
+
 `magit-gptcommit` depends on [llm](https://github.com/ahyatt/llm). Please read the
 [documentation](https://github.com/ahyatt/llm?tab=readme-ov-file#setting-up-providers)
 of `llm` for more details on how to set up providers. Debug logging for `llm` can be enabled by setting `llm-log` to `t`.
