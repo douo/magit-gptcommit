@@ -15,7 +15,7 @@ https://github.com/douo/magit-gptcommit/assets/743074/8494b235-aa1a-4404-82e3-0a
 # Setup
 
 > [!NOTE]
-> If you are using [gptel](https://github.com/karthink/gptel) as a backend, please check out this branch: [gptel](https://github.com/douo/magit-gptcommit/tree/gptel)
+> If you are using [gptel](https://github.com/karthink/gptel) as a backend, please check out this branch(Not recommended!): [gptel](https://github.com/douo/magit-gptcommit/tree/gptel) 
 
 
 `magit-gptcommit` depends on [llm](https://github.com/ahyatt/llm). Please read the
@@ -82,38 +82,35 @@ Setup example using [use-package](https://github.com/jwiegley/use-package) and [
 Setup an `llm` provider for Google Gemini using [use-package](https://github.com/jwiegley/use-package), [straight](https://github.com/radian-software/straight.el), and Emacs `auth-source`, given that there is an `auth-source` secret stored with the host "generativelanguage.googleapis.com" and the user "apikey".
 
 ``` emacs-lisp
+(use-package llm
+  :straight t
+  :init
+  (require 'llm-gemini)
+  :config
+  (setopt llm-gemini-provider
+          (make-llm-gemini :key (auth-info-password
+                                 (car (auth-source-search
+                                       :host "generativelanguage.googleapis.com"
+                                       :user "apikey")))
+                           :chat-model "gemini-1.5-flash-latest"))
+  :custom
+  (llm-warn-on-nonfree nil))
+
 (use-package magit-gptcommit
   :straight t
   :demand t
-  :after magit
-  :bind (:map git-commit-mode-map
-              ("C-c C-g" . magit-gptcommit-commit-accept))
-  :init
-  (defun my/magit-gptcommit-gemini-llm-provider ()
-    (let (provider)
-      (lambda ()
-        (or provider
-            (progn
-              (require 'llm-gemini)
-              (setq provider (make-llm-gemini
-                              :key
-                              (auth-info-password
-                               (car (auth-source-search
-                                     :host "generativelanguage.googleapis.com"
-                                     :user "apikey"))))))))))
+  :after llm
   :custom
-  (magit-gptcommit-llm-provider (my/magit-gptcommit-gemini-llm-provider))
-
-  :config
-  ;; Enable magit-gptcommit-mode to watch staged changes and generate commit message automatically in magit status buffer
-  ;; This mode is optional, you can also use `magit-gptcommit-generate' to generate commit message manually
-  ;; `magit-gptcommit-generate' should only execute on magit status buffer currently
-  ;; (magit-gptcommit-mode 1)
-
-  ;; Add gptcommit transient commands to `magit-commit'
-  ;; Eval (transient-remove-suffix 'magit-commit '(1 -1)) to remove gptcommit transient commands
-  (magit-gptcommit-status-buffer-setup))
+  (magit-gptcommit-llm-provider llm-gemini-provider)
+...)
 ```
+
+Content of the Auth Sources(`~/.authinfo`):
+```
+machine generativelanguage.googleapis.com login apikey password <api-key>
+```
+> [!TIP]
+> Mastering Emacs has a great article on how to store secrets in Emacs using GnuPG and Auth Sources: [Keeping Secrets in Emacs](https://www.masteringemacs.org/article/keeping-secrets-in-emacs-gnupg-auth-sources)
 
 # Todo
 
