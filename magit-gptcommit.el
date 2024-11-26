@@ -109,6 +109,19 @@ Now write Commit message in follow template: [label]:[one line of summary] :
   :group 'magit-gptcommit)
 
 
+(defcustom magit-gptcommit-process-commit-message-function #'magit-gptcommit--process-commit-message
+  "Commit message function."
+  :type 'function
+  :group 'magit-gptcommit)
+
+(defcustom magit-gptcommit-commit-message-action 'replace
+  "Commit message action."
+  :type '(choice
+          (const append)
+          (const prepend)
+          (const replace))
+  :group 'magit-gptcommit)
+
 ;;; Cache
 (defvar magit-gptcommit-cache-limit 30
   "Max number of cache entries.")
@@ -368,6 +381,28 @@ NO-CACHE is non-nil if cache should be ignored."
       (delete-region start end))
     (delete section (oref magit-root-section children))))
 
+(defun magit-gptcommit--process-commit-message (message orig-message)
+  "Process commit message based on generated MESSAGE and current commit message ORIG-MESSAGE.
+
+Executed in the context of the commit message buffer."
+  ;; Process the message but not the instructions at the end.
+  (save-restriction
+    (goto-char (point-min))
+    (narrow-to-region
+     (point)
+     (if (re-search-forward (concat "^" comment-start) nil t)
+         (max 1 (- (point) 2))
+       (point-max)))
+    (pcase magit-gptcommit-commit-message-action
+      ('append (goto-char (point-max)))
+      ('prepend (goto-char (point-min)))
+      (_ (delete-region (point-min) (point)))) ; defaults to 'replace
+    ;; Insert the new message.
+    (insert (string-trim message))
+    (insert (or
+             (and (eq magit-gptcommit-commit-message-action 'prepend) " ")
+             "\n"))))
+
 ;;;; Commit Message
 (defun magit-gptcommit-commit-accept ()
   "Accept gptcommit message, after saving current message."
@@ -375,22 +410,14 @@ NO-CACHE is non-nil if cache should be ignored."
   (when-let ((message (magit-repository-local-get 'magit-gptcommit--last-message))
              (buf (magit-commit-message-buffer)))
     (with-current-buffer buf
-      ;; save the current non-empty and newly written comment,
-      ;; because otherwise it would be irreversibly lost.
-      (when-let ((message (git-commit-buffer-message)))
-        (unless (ring-member log-edit-comment-ring message)
-          (ring-insert log-edit-comment-ring message)))
-      ;; Delete the message but not the instructions at the end.
-      (save-restriction
-        (goto-char (point-min))
-        (narrow-to-region
-         (point)
-         (if (re-search-forward (concat "^" comment-start) nil t)
-             (max 1 (- (point) 2))
-           (point-max)))
-        (delete-region (point-min) (point)))
-      ;; Insert the new message.
-      (insert message))))
+      (let (orig-message)
+        ;; save the current non-empty and newly written comment,
+        ;; because otherwise it would be irreversibly lost.
+        (when-let ((message (git-commit-buffer-message)))
+          (unless (ring-member log-edit-comment-ring message)
+            (ring-insert log-edit-comment-ring message)
+            (setq orig-message message)))
+        (funcall magit-gptcommit-process-commit-message-function message orig-message)))))
 
 (defun magit-gptcommit-commit-create ()
   "Execute `magit-commit-create' and bring gptcommit message to editor."
@@ -404,7 +431,8 @@ NO-CACHE is non-nil if cache should be ignored."
   "Accept gptcommit message and make a commit with current staged."
   (interactive)
   (if-let ((message (magit-repository-local-get 'magit-gptcommit--last-message)))
-      (magit-run-git "commit" "-m" message)
+      (magit-run-git "commit" "-m"
+                     (funcall magit-gptcommit-process-commit-message-function message nil))
     (user-error "No last gptcommit message found")))
 
 ;;;; gptel
