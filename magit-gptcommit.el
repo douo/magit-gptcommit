@@ -109,6 +109,19 @@ Now write Commit message in follow template: [label]:[one line of summary] :
   :group 'magit-gptcommit)
 
 
+(defcustom magit-gptcommit-process-commit-message-function #'magit-gptcommit--process-commit-message
+  "Commit message function."
+  :type 'function
+  :group 'magit-gptcommit)
+
+(defcustom magit-gptcommit-commit-message-action 'replace
+  "Commit message action."
+  :type '(choice
+          (const append)
+          (const prepend)
+          (const replace))
+  :group 'magit-gptcommit)
+
 ;;; Cache
 (defvar magit-gptcommit-cache-limit 30
   "Max number of cache entries.")
@@ -305,12 +318,23 @@ NO-CACHE is non-nil if cache should be ignored."
               (when worker
                 (magit-gptcommit-abort))
               (insert "\n")
-              (magit-gptcommit-gptel-get-response
-               key
-               (list :prompt (list (list :role "user" :content (format magit-gptcommit-prompt diff)))
-                     :buffer buf
-                     :position (point-marker))
-               #'magit-gptcommit--stream-insert-response)))
+              (magit-repository-local-set 'magit-gptcommit--active-worker
+                                          (make-magit-gptcommit--worker
+                                           ;; NOTE: process is never used anywhere?
+                                           :key key))
+              (gptel-request (format magit-gptcommit-prompt diff)
+                :callback #'magit-gptcommit--stream-insert-response
+                :buffer buf
+                :position (point-marker)
+                :fsm (gptel-make-fsm
+                      :state 'INIT
+                      :table gptel-request--transitions
+                      :handlers '((WAIT gptel--handle-wait)
+                                  (ERRS magit-gptcommit--handle-errs gptel--fsm-last)
+                                  ;; FIXME: this is useful?
+                                  (TOOL gptel--handle-tool-use)
+                                  (TYPE magit-gptcommit--handle-type)
+                                  (DONE magit-gptcommit--handle-done gptel--fsm-last))))))
           ;; store section in repository-local active worker
           (let ((section (car (last (oref magit-root-section children))))
                 (worker (magit-repository-local-get 'magit-gptcommit--active-worker)))
@@ -368,6 +392,28 @@ NO-CACHE is non-nil if cache should be ignored."
       (delete-region start end))
     (delete section (oref magit-root-section children))))
 
+(defun magit-gptcommit--process-commit-message (message orig-message)
+  "Process commit message based on generated MESSAGE and current commit message ORIG-MESSAGE.
+
+Executed in the context of the commit message buffer."
+  ;; Process the message but not the instructions at the end.
+  (save-restriction
+    (goto-char (point-min))
+    (narrow-to-region
+     (point)
+     (if (re-search-forward (concat "^" comment-start) nil t)
+         (max 1 (- (point) 2))
+       (point-max)))
+    (pcase magit-gptcommit-commit-message-action
+      ('append (goto-char (point-max)))
+      ('prepend (goto-char (point-min)))
+      (_ (delete-region (point-min) (point)))) ; defaults to 'replace
+    ;; Insert the new message.
+    (insert (string-trim message))
+    (insert (or
+             (and (eq magit-gptcommit-commit-message-action 'prepend) " ")
+             "\n"))))
+
 ;;;; Commit Message
 (defun magit-gptcommit-commit-accept ()
   "Accept gptcommit message, after saving current message."
@@ -375,22 +421,14 @@ NO-CACHE is non-nil if cache should be ignored."
   (when-let ((message (magit-repository-local-get 'magit-gptcommit--last-message))
              (buf (magit-commit-message-buffer)))
     (with-current-buffer buf
-      ;; save the current non-empty and newly written comment,
-      ;; because otherwise it would be irreversibly lost.
-      (when-let ((message (git-commit-buffer-message)))
-        (unless (ring-member log-edit-comment-ring message)
-          (ring-insert log-edit-comment-ring message)))
-      ;; Delete the message but not the instructions at the end.
-      (save-restriction
-        (goto-char (point-min))
-        (narrow-to-region
-         (point)
-         (if (re-search-forward (concat "^" comment-start) nil t)
-             (max 1 (- (point) 2))
-           (point-max)))
-        (delete-region (point-min) (point)))
-      ;; Insert the new message.
-      (insert message))))
+      (let (orig-message)
+        ;; save the current non-empty and newly written comment,
+        ;; because otherwise it would be irreversibly lost.
+        (when-let ((message (git-commit-buffer-message)))
+          (unless (ring-member log-edit-comment-ring message)
+            (ring-insert log-edit-comment-ring message)
+            (setq orig-message message)))
+        (funcall magit-gptcommit-process-commit-message-function message orig-message)))))
 
 (defun magit-gptcommit-commit-create ()
   "Execute `magit-commit-create' and bring gptcommit message to editor."
@@ -404,173 +442,34 @@ NO-CACHE is non-nil if cache should be ignored."
   "Accept gptcommit message and make a commit with current staged."
   (interactive)
   (if-let ((message (magit-repository-local-get 'magit-gptcommit--last-message)))
-      (magit-run-git "commit" "-m" message)
+      (magit-run-git "commit" "-m"
+                     (funcall magit-gptcommit-process-commit-message-function message nil))
     (user-error "No last gptcommit message found")))
 
 ;;;; gptel
-;;;;; modified from `gptel-curl-get-response'
-(defun magit-gptcommit-gptel-get-response (key info callback)
-  "Retrieve response to prompt in INFO.
+(defun magit-gptcommit--handle-done (fsm)
+  (let* ((info (gptel-fsm-info fsm))
+         (gptel-buffer (plist-get info :buffer))
+         (tracking-marker (plist-get info :tracking-marker))
+         (start-marker (plist-get info :position))
+         response-beg response-end)
+    (with-current-buffer (marker-buffer start-marker)
+      (setq response-beg (+ start-marker 2)
+            response-end (marker-position tracking-marker))
+      (pulse-momentary-highlight-region response-beg tracking-marker))
+    (with-current-buffer gptel-buffer
+      (magit-gptcommit--stream-update-status 'success))
+    (magit-repository-local-delete 'magit-gptcommit--active-worker)))
 
-KEY is a unique identifier for the worker.
+(defun magit-gptcommit--handle-type (fsm)
+  (with-current-buffer (plist-get (gptel-fsm-info fsm) :buffer)
+    (magit-gptcommit--stream-update-status 'typing)))
 
-INFO is a plist with the following keys:
-- :prompt (the prompt being sent)
-- :buffer (the gptel buffer)
-- :position (marker at which to insert the response).
-
-Call CALLBACK with the response and INFO afterwards.  If omitted
-the response is inserted into the current buffer after point."
-  (let* ((token (md5 (format "%s%s%s%s"
-                             (random) (emacs-pid) (user-full-name)
-                             (recent-keys))))
-         (args (gptel-curl--get-args (plist-get info :prompt) token))
-         (stream (and gptel-stream (gptel-backend-stream gptel-backend)))
-         (process (apply #'start-process "gptel-curl"
-                         (generate-new-buffer "*gptel-curl*") "curl" args)))
-    (when (eq gptel-log-level 'debug)
-      (message "%S" args))
-    ;; store process in repository-local variable
-    (magit-repository-local-set 'magit-gptcommit--active-worker
-                                (make-magit-gptcommit--worker
-                                 :key key
-                                 :process process))
-    (with-current-buffer (process-buffer process)
-      (set-process-query-on-exit-flag process nil)
-      (setf (alist-get process gptel-curl--process-alist)
-            (nconc (list :token token
-                         ;; FIXME `aref' breaks `cl-struct' abstraction boundary
-                         ;; FIXME `cl--generic-method' is an internal `cl-struct'
-                         :parser (cl--generic-method-function
-                                  (if stream
-                                      ;; 调用 buffer 对应 backend 的 stream parser
-                                      (cl-find-method
-                                       'gptel-curl--parse-stream nil
-                                       (list
-                                        (aref (buffer-local-value
-                                               'gptel-backend (plist-get info :buffer))
-                                              0) t))
-                                    (cl-find-method
-                                     'gptel--parse-response nil
-                                     (list
-                                      ;; Emacs 中的 array 是字符串或 vector [1 2 3]
-                                      (aref (buffer-local-value
-                                             'gptel-backend (plist-get info :buffer))
-                                            0) t t))))
-                         :callback (or callback
-                                       (if stream
-                                           #'gptel-curl--stream-insert-response
-                                         #'gptel--insert-response))
-                         :transformer nil)
-                   info))
-      (if stream
-          (progn (set-process-sentinel process #'magit-gptcommit--stream-cleanup)
-                 (set-process-filter process #'magit-gptcommit--stream-filter))
-        (set-process-sentinel process #'gptel-curl--sentinel)))))
-
-(defun magit-gptcommit--stream-cleanup (process _status)
-  "Process sentinel for GPTel curl requests.
-
-PROCESS and _STATUS are process parameters."
-  (let ((proc-buf (process-buffer process)))
-    (when (eq gptel-log-level 'debug)
-      (with-current-buffer proc-buf
-        (clone-buffer "*gptel-error*" 'show)))
-    (let* ((info (alist-get process gptel-curl--process-alist))
-           (gptel-buffer (plist-get info :buffer))
-           (backend-name
-            (gptel-backend-name
-             (buffer-local-value 'gptel-backend gptel-buffer)))
-           (tracking-marker (plist-get info :tracking-marker))
-           (start-marker (plist-get info :position))
-           (http-status (plist-get info :http-status))
-           (http-msg (plist-get info :status))
-           ;; (callback (plist-get info :callback))
-           response-beg response-end)
-      (if (equal http-status "200")
-          (progn
-            ;; Finish handling response
-            (with-current-buffer (marker-buffer start-marker)
-              (setq response-beg (+ start-marker 2)
-                    response-end (marker-position tracking-marker))
-              (pulse-momentary-highlight-region response-beg tracking-marker))
-              ;; (when gptel-mode (save-excursion (goto-char tracking-marker)
-              ;;                                  (insert "\n\n" (gptel-prompt-prefix-string))))
-            (with-current-buffer gptel-buffer
-              (magit-gptcommit--stream-update-status 'success)))
-        ;; Or Capture error message
-        (with-current-buffer proc-buf
-          (goto-char (point-max))
-          (search-backward (plist-get info :token))
-          (backward-char)
-          (pcase-let* ((`(,_ . ,header-size) (read (current-buffer)))
-                       (json-object-type 'plist)
-                       (response (progn (goto-char header-size)
-                                        (condition-case nil (json-read)
-                                          (json-readtable-error 'json-read-error))))
-                       (error-data (plist-get response :error)))
-            (cond
-             (error-data
-              (if (stringp error-data)
-                  (message "%s error: (%s) %s" backend-name http-msg error-data)
-                (when-let ((error-msg (plist-get error-data :message)))
-                  (message "%s error: (%s) %s" backend-name http-msg error-msg))
-                (when-let ((error-type (plist-get error-data :type)))
-                  (setq http-msg (concat "("  http-msg ") " (string-trim error-type))))))
-             ((eq response 'json-read-error)
-              (message "ChatGPT error (%s): Malformed JSON in response." http-msg))
-             (t (message "ChatGPT error (%s): Could not parse HTTP response." http-msg)))))
-        (with-current-buffer gptel-buffer
-          ;; tell callback error occurred
-          (magit-gptcommit--stream-update-status 'error http-msg)))
-      (with-current-buffer gptel-buffer
-        (run-hook-with-args 'gptel-post-response-functions response-beg response-end)
-        (setq-local magit-inhibit-refresh nil)))
-    (setf (alist-get process gptel-curl--process-alist nil 'remove) nil)
-    ;; clear repository-local variable
-    (magit-repository-local-delete 'magit-gptcommit--active-worker)
-    (kill-buffer proc-buf)))
-
-(defun magit-gptcommit--stream-filter (process output)
-  "Process filter for GPTel curl requests.
-OUTPUT is the PROCESS stdout."
-  (let* ((proc-info (alist-get process gptel-curl--process-alist)))
-    (with-current-buffer (process-buffer process)
-      ;; Insert output
-      (save-excursion
-        (goto-char (process-mark process))
-        (insert output)
-        (set-marker (process-mark process) (point)))
-
-      ;; Find HTTP status
-      (unless (plist-get proc-info :http-status)
-        (save-excursion
-          (goto-char (point-min))
-          (when-let* (((not (= (line-end-position) (point-max))))
-                      (http-msg (buffer-substring (line-beginning-position)
-                                                  (line-end-position)))
-                      (http-status
-                       (save-match-data
-                         (and (string-match "HTTP/[.0-9]+ +\\([0-9]+\\)" http-msg)
-                              (match-string 1 http-msg)))))
-            (plist-put proc-info :http-status http-status)
-            (plist-put proc-info :status (string-trim http-msg))))
-        ;; Run pre-response hook
-        (when (and (equal (plist-get proc-info :http-status) "200")
-                   gptel-pre-response-hook)
-          (with-current-buffer (marker-buffer (plist-get proc-info :position))
-            (run-hooks 'gptel-pre-response-hook))))
-
-      (when-let ((http-msg (plist-get proc-info :status))
-                 (http-status (plist-get proc-info :http-status)))
-        ;; Find data chunk(s) and run callback
-        (when-let (((equal http-status "200"))
-                   (response (funcall (plist-get proc-info :parser) nil proc-info))
-                   ((not (equal response ""))))
-          (funcall (or (plist-get proc-info :callback)
-                       #'gptel-curl--stream-insert-response)
-                   response proc-info)
-          (magit-gptcommit--stream-update-status 'typing))))))
+(defun magit-gptcommit--handle-errs (fsm)
+  (let ((info (gptel-fsm-info fsm)))
+    (with-current-buffer (plist-get info :buffer)
+      ;; tell callback error occurred
+      (magit-gptcommit--stream-update-status 'error (plist-get info :status)))))
 
 (defun magit-gptcommit--stream-insert-response (msg info)
   "Insert response in target section located by CONDITION.
