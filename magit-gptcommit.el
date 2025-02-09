@@ -432,7 +432,8 @@ Executed in the context of the commit message buffer."
           (unless (ring-member log-edit-comment-ring message)
             (ring-insert log-edit-comment-ring message)
             (setq orig-message message)))
-        (funcall magit-gptcommit-process-commit-message-function message orig-message)))))
+        (funcall magit-gptcommit-process-commit-message-function message orig-message)
+        (save-buffer)))))
 
 (defun magit-gptcommit-commit-create ()
   "Execute `magit-commit-create' and bring gptcommit message to editor."
