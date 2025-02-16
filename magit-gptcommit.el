@@ -442,7 +442,6 @@ Executed in the context of the commit message buffer."
     (magit-gptcommit--add-hook-run-once 'git-commit-setup-hook hook)
     (magit-commit-create)))
 
-
 (defun magit-gptcommit-commit-quick ()
   "Accept gptcommit message and make a commit with current staged."
   (interactive)
