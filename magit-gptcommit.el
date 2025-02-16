@@ -447,8 +447,7 @@ Executed in the context of the commit message buffer."
   "Accept gptcommit message and make a commit with current staged."
   (interactive)
   (if-let ((message (magit-repository-local-get 'magit-gptcommit--last-message)))
-      (magit-run-git "commit" "-m"
-                     (funcall magit-gptcommit-process-commit-message-function message nil))
+      (magit-run-git "commit" "-m" message)
     (user-error "No last gptcommit message found")))
 
 ;;;; response handling
