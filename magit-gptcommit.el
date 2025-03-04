@@ -382,8 +382,8 @@ NO-CACHE is non-nil if cache should be ignored."
     (message "%s" worker)
     (dolist (pair (oref worker sections))
       (let ((buf (car pair)))
-        (with-current-buffer buf
-          (setq-local magit-inhibit-refresh nil))))
+        (when (buffer-live-p buf)
+          (setf (buffer-local-value 'magit-inhibit-refresh buf) nil))))
     (magit-repository-local-delete 'magit-gptcommit--active-worker repository)
     (llm-cancel-request (oref worker llm-request))))
 
