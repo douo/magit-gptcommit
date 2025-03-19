@@ -588,6 +588,20 @@ Call CALLBACK with the response and INFO with partial and full responses."
                     response-callback
                     error-callback)))))
 
+;; Add buffer-kill-hooks to abort gptcommit when magit buffers are killed
+(defun magit-gptcommit--buffer-kill-hook ()
+  "Abort gptcommit when a buffer is killed that might be part of the process."
+  (when-let ((worker (magit-repository-local-get 'magit-gptcommit--active-worker)))
+    (let ((sections (oref worker sections))
+          (current-buf (current-buffer)))
+      ;; If this buffer is in the sections, abort the entire process
+      (when (assq current-buf sections)
+        (message "Magit buffer killed, aborting gptcommit process")
+        (magit-gptcommit-abort)))))
+
+;; Add the hook
+(add-hook 'kill-buffer-hook #'magit-gptcommit--buffer-kill-hook)
+
 ;;;; Footer
 
 (provide 'magit-gptcommit)
