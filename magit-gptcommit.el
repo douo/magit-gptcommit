@@ -379,13 +379,15 @@ NO-CACHE is non-nil if cache should be ignored."
   "Abort gptcommit process for current REPOSITORY."
   (interactive)
   (when-let ((worker (magit-repository-local-get 'magit-gptcommit--active-worker nil repository)))
-    (message "%s" worker)
     (dolist (pair (oref worker sections))
       (let ((buf (car pair)))
-        (with-current-buffer buf
-          (setq-local magit-inhibit-refresh nil))))
-    (magit-repository-local-delete 'magit-gptcommit--active-worker repository)
-    (llm-cancel-request (oref worker llm-request))))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (setq-local magit-inhibit-refresh nil)))))
+    (when-let ((request (oref worker llm-request)))
+      (ignore-errors (llm-cancel-request request)))
+    ;; Always clean up the repository local variable
+    (magit-repository-local-delete 'magit-gptcommit--active-worker repository)))
 
 (defun magit-gptcommit-remove-section ()
   "Remove gptcommit SECTION from magit buffer if exist."
@@ -483,8 +485,8 @@ INFO is the request metadata."
 STATUS is one of `success', `error'.
 ERROR-MSG is error message."
   ;; (message "magit-gptcommit--stream-update-status %s" status)
-  (let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-         (sections (oref worker sections)))
+  (when-let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
+              (sections (and worker (oref worker sections))))
     (dolist (pair sections)
       (-let (((buf . section) pair))
         (when (buffer-live-p buf)
@@ -497,10 +499,11 @@ ERROR-MSG is error message."
                     ('success
                      (magit-gptcommit--update-heading-status "Done" 'success)
                      (let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-                            (last-message (oref worker message))
-                            (key (oref worker key)))
-                       (magit-repository-local-set 'magit-gptcommit--last-message last-message)
-                       (magit-gptcommit--cache-set key last-message))
+                            (last-message (and worker (oref worker message)))
+                            (key (and worker (oref worker key))))
+                       (when (and last-message key)
+                         (magit-repository-local-set 'magit-gptcommit--last-message last-message)
+                         (magit-gptcommit--cache-set key last-message)))
                      ;; update section properties
                      (put-text-property content end 'magit-section section)
                      ;; update keymap
@@ -591,13 +594,13 @@ Call CALLBACK with the response and INFO with partial and full responses."
 ;; Add buffer-kill-hooks to abort gptcommit when magit buffers are killed
 (defun magit-gptcommit--buffer-kill-hook ()
   "Abort gptcommit when a buffer is killed that might be part of the process."
-  (when-let ((worker (magit-repository-local-get 'magit-gptcommit--active-worker)))
-    (let ((sections (oref worker sections))
-          (current-buf (current-buffer)))
-      ;; If this buffer is in the sections, abort the entire process
-      (when (assq current-buf sections)
-        (message "Magit buffer killed, aborting gptcommit process")
-        (magit-gptcommit-abort)))))
+  (when-let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
+              (sections (and worker (oref worker sections)))
+              (current-buf (current-buffer)))
+    ;; If this buffer is in the sections, abort the entire process
+    (when (assq current-buf sections)
+      (message "Magit buffer killed, aborting gptcommit process")
+      (magit-gptcommit-abort))))
 
 ;; Add the hook
 (add-hook 'kill-buffer-hook #'magit-gptcommit--buffer-kill-hook)
