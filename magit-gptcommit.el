@@ -51,33 +51,34 @@ Stored as a cons cell (PROCESS . RESPONSE) where RESPONE is a SSO Message.")
   "Structure respesenting current active llm request."
   key llm-request message sections)
 
-(defconst magit-gptcommit-prompt-one-line "You are an expert programmer writing a commit message.
-You went over every file diff that was changed in it.
+(defconst magit-gptcommit-prompt-one-line "You are an expert programmer writing a Git commit message.
+You have carefully reviewed every file diff included in this commit.
 
-First Determine the best label for the diffs.
+First, choose the most appropriate label for the changes.
 Here are the labels you can choose from:
-- build: Changes that affect the build system or external dependencies (example scopes: gulp, broccoli, npm)
-- chore: Updating libraries, copyrights or other repo setting, includes updating dependencies.
-- ci: Changes to our CI configuration files and scripts (example scopes: Travis, Circle, GitHub Actions)
-- docs: Non-code changes, such as fixing typos or adding new documentation
-- feat: a commit of the type feat introduces a new feature to the codebase
-- fix: A commit of the type fix patches a bug in your codebase
-- perf: A code change that improves performance
-- refactor: A code change that neither fixes a bug nor adds a feature
-- style: Changes that do not affect the meaning of the code (white-space, formatting, missing semi-colons, etc)
-- test: Adding missing tests or correcting existing tests
+- build: Changes that affect the build system or external dependencies (e.g., gulp, broccoli, npm)
+- chore: Routine tasks like updating dependencies, licenses, or repo settings
+- ci: Changes to CI configuration files or scripts (e.g., GitHub Actions, CircleCI)
+- docs: Documentation-only changes (e.g., fixing typos, adding examples)
+- feat: Introduces a new feature to the codebase
+- fix: Patches a bug in the codebase
+- perf: Improves performance without changing behavior
+- refactor: Code changes that neither fix bugs nor add features
+- style: Non-functional changes like formatting or whitespace
+- test: Adds or corrects tests
 
-Then summarize the commit into a single specific and cohesive theme.
-Remember to write in only one line, no more than 50 characters.
-Write your response using the imperative tense following the kernel git commit style guide.
-Write a high level title.
+Next, write a high-level summary of the commit.
+- Keep it to a single line, no more than 50 characters
+- Use the imperative tense (e.g., 'Add logging' not 'Added logging')
+- Ensure the message reflects a clear and cohesive change
+- Do not end the summary with a period
+- Do not use backticks (`) anywhere in the response
 
 THE FILE DIFFS:
 ```
 %s
 ```
-Now write Commit message in follow template: [label]:[one line of summary] :
-")
+Now, write the commit message using this format: [label]: [summary]")
 
 (defcustom magit-gptcommit-prompt magit-gptcommit-prompt-one-line
   "The prompt that was used to generate the commit message."
