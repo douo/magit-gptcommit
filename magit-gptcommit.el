@@ -356,7 +356,9 @@ NO-CACHE is non-nil if cache should be ignored."
             (oset worker sections
                   (cons (cons buf section)
                         (oref worker sections))))
-          (setq-local magit-inhibit-refresh t)))
+          (setq-local magit-inhibit-refresh t)
+          ;; Add the buffer-local hook now that we know a section exists
+          (add-hook 'kill-buffer-hook #'magit-gptcommit--buffer-kill-hook nil t)))
       ;; move section to correct position
       (oset magit-root-section children
             (magit-gptcommit--move-last-to-position
@@ -602,9 +604,6 @@ Call CALLBACK with the response and INFO with partial and full responses."
     (when (assq current-buf sections)
       (message "Magit buffer killed, aborting gptcommit process")
       (magit-gptcommit-abort))))
-
-;; Add the hook
-(add-hook 'kill-buffer-hook #'magit-gptcommit--buffer-kill-hook)
 
 ;;;; Footer
 
