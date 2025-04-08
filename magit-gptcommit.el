@@ -147,11 +147,11 @@ is nil."
   :group 'magit-gptcommit)
 
 ;;; Cache
-(defvar magit-gptcommit-cache-limit 30
+(defvar magit-gptcommit-cache-limit 4096
   "Max number of cache entries.")
 
-(defvar magit-gptcommit--cache nil
-  "Cache of generated commit message.")
+(defvar magit-gptcommit--cache (make-hash-table :test 'equal :size magit-gptcommit-cache-limit)
+  "Cache of generated commit messages as a hash table.")
 
 (cl-defun magit-gptcommit--cache-key (content &optional (repository (magit-repository-local-repository)))
   "Return cache key for CONTENT and REPOSITORY."
@@ -160,37 +160,26 @@ is nil."
 
 (defun magit-gptcommit--cache-set (key value)
   "Set cache VALUE for KEY."
-  (let ((cache magit-gptcommit--cache))
-    (if cache
-        (let ((keyvalue (assoc key cache)))
-          (if keyvalue
-              ;; Update pre-existing value for key.
-              (setcdr keyvalue value)
-            ;; No such key in repository-local cache.
-            ;; if cache is full, remove half of it
-            (when (>= (length cache) magit-gptcommit-cache-limit)
-              (setf cache
-                    (seq-take cache (/ (length cache) 2))))
-            ;; Add new key-value pair to cache.
-            (push (cons key value) cache)))
-      ;; No cache
-      (push (cons key value)
-            cache))))
+  ;; If cache is full, remove half of the entries
+  (when (>= (hash-table-count magit-gptcommit--cache) magit-gptcommit-cache-limit)
+    (let* ((keys (hash-table-keys magit-gptcommit--cache))
+           (half-count (/ (length keys) 2)))
+      (dolist (k (seq-take keys half-count))
+        (remhash k magit-gptcommit--cache))))
+  ;; Add the new value
+  (puthash key value magit-gptcommit--cache))
 
 (defun magit-gptcommit--cache-get (key &optional default)
   "Return cache value for KEY or DEFAULT if not found."
-  (if-let ((keyvalue (magit-gptcommit--cache-p key)))
-      (cdr keyvalue) ; TODO: LRU Cache
-    default))
+  (gethash key magit-gptcommit--cache default))
 
 (defun magit-gptcommit--cache-p (key)
   "Non-nil when a value exists for KEY.
 
-Return a (KEY . VALUE) cons cell.
-
-The KEY is matched using `equal'."
-  (and-let* ((cache magit-gptcommit--cache))
-    (assoc key cache)))
+Return a (KEY . VALUE) cons cell for compatibility with the old implementation."
+  (let ((value (gethash key magit-gptcommit--cache 'not-found)))
+    (unless (eq value 'not-found)
+      (cons key value))))
 
 
 ;;; utils
