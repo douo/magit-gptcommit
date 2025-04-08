@@ -309,8 +309,7 @@ NO-CACHE is non-nil if cache should be ignored."
                 (format
                  (propertize "GPT commit: %s" 'font-lock-face 'magit-section-heading)
                  (propertize "Cache" 'font-lock-face 'success)))
-              (insert msg)
-              (insert "\n")
+              (insert msg "\n\n")
               (magit-repository-local-set 'magit-gptcommit--last-message msg))
           (magit-insert-section (gptcommit nil nil)
             (magit-insert-heading
