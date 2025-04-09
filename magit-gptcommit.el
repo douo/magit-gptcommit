@@ -322,8 +322,8 @@ NO-CACHE is non-nil if cache should be ignored."
                   ;; FIXME: Attemp to clean old section from buffer but not working
                   ;; So we have to set `magit-inhibit-refresh' to avoid the problem.
                   (assq-delete-all buf (oref worker sections))
-                  (insert (oref (magit-repository-local-get 'magit-gptcommit--active-worker) message))
-                  (insert "\n"))
+                  (insert (oref (magit-repository-local-get 'magit-gptcommit--active-worker) message)
+                          "\n"))
               (when worker
                 (magit-gptcommit-abort))
               (let ((start-position (point-marker))
@@ -406,8 +406,8 @@ Executed in the context of the commit message buffer."
       ('prepend (goto-char (point-min)))
       (_ (delete-region (point-min) (point)))) ; defaults to 'replace
     ;; Insert the new message.
-    (insert (string-trim message))
-    (insert (or
+    (insert (string-trim message)
+            (or
              (and (eq magit-gptcommit-commit-message-action 'prepend) " ")
              "\n"))))
 
