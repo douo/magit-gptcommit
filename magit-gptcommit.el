@@ -23,6 +23,30 @@
 (require 'magit)
 (require 'llm)
 
+;; Debugging facilities
+(defcustom magit-gptcommit-debug nil
+  "When non-nil, enable detailed debugging for magit-gptcommit.
+This will log detailed information about worker operations, callbacks,
+and state changes to help diagnose race conditions when staging
+changes quickly."
+  :type 'boolean
+  :group 'magit-gptcommit)
+
+(defvar magit-gptcommit--debug-buffer-name "*magit-gptcommit-debug*"
+  "Name of the buffer where debug messages are logged.")
+
+(defun magit-gptcommit--debug (format-string &rest args)
+  "Log a debug message if debugging is enabled.
+FORMAT-STRING and ARGS are passed to `format'."
+  (when magit-gptcommit-debug
+    (let ((buf (get-buffer-create magit-gptcommit--debug-buffer-name))
+          (msg (apply #'format format-string args)))
+      (with-current-buffer buf
+        (goto-char (point-max))
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t)
+              (timestamp (format-time-string "%H:%M:%S.%3N")))
+          (insert (format "[%s] %s\n" timestamp msg)))))))
 
 ;;;###autoload
 (define-minor-mode magit-gptcommit-mode
@@ -287,97 +311,110 @@ SECTION is determined by CONDITION, which is defined in `magit-section-match'."
 Staged section position is determined by CONDITION,
 which is defined in `magit-section-match'.
 NO-CACHE is non-nil if cache should be ignored."
+  (magit-gptcommit--debug "Inserting gptcommit section with condition: %s, no-cache: %s"
+                          condition no-cache)
   (if (not magit-gptcommit-llm-provider)
-      (error "No llm provider, please configure `magit-gptcommit-llm-provider'."))
-  (save-excursion
-    (when-let ((buf (current-buffer))
-               ;; generated if staged section exists
-               ;; TODO: magit-anything-staged-p
-               (pos (magit-gptcommit--goto-target-position condition))
-               (inhibit-read-only t)
-               (magit-insert-section--parent magit-root-section))
+      (progn
+        (magit-gptcommit--debug "No LLM provider configured")
+        (error "No llm provider, please configure `magit-gptcommit-llm-provider'."))
+    (save-excursion
+      (when-let ((buf (current-buffer))
+                 ;; generated if staged section exists
+                 ;; TODO: magit-anything-staged-p
+                 (pos (magit-gptcommit--goto-target-position condition))
+                 (inhibit-read-only t)
+                 (magit-insert-section--parent magit-root-section))
 
-      (magit-repository-local-delete 'magit-gptcommit--last-message)
-      (let* ((diff (magit-gptcommit--retrieve-staged-diff))
-             (key (magit-gptcommit--cache-key diff))
-             (worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-             (oldkey (and worker (oref worker key))))
-        (if-let ((msg (and (not no-cache) (magit-gptcommit--cache-get key))))
-            ;; cache hit
+        (magit-repository-local-delete 'magit-gptcommit--last-message)
+        (let* ((diff (magit-gptcommit--retrieve-staged-diff))
+               (key (magit-gptcommit--cache-key diff))
+               (worker (magit-repository-local-get 'magit-gptcommit--active-worker))
+               (oldkey (and worker (magit-gptcommit--worker-key worker))))
+          (if-let ((msg (and (not no-cache) (magit-gptcommit--cache-get key))))
+              ;; cache hit
+              (magit-insert-section (gptcommit nil nil)
+                (magit-insert-heading
+                  (format
+                   (propertize "GPT commit: %s" 'font-lock-face 'magit-section-heading)
+                   (propertize "Cache" 'font-lock-face 'success)))
+                (insert msg "\n\n")
+                (magit-repository-local-set 'magit-gptcommit--last-message msg))
+            ;; cache miss
             (magit-insert-section (gptcommit nil nil)
               (magit-insert-heading
                 (format
                  (propertize "GPT commit: %s" 'font-lock-face 'magit-section-heading)
-                 (propertize "Cache" 'font-lock-face 'success)))
-              (insert msg "\n\n")
-              (magit-repository-local-set 'magit-gptcommit--last-message msg))
-          (magit-insert-section (gptcommit nil nil)
-            (magit-insert-heading
-              (format
-               (propertize "GPT commit: %s" 'font-lock-face 'magit-section-heading)
-               (propertize "Waiting" 'font-lock-face 'warning)))
-            (if (and worker (equal key oldkey))
-                ;; if yes, then just insert the generated commit message
-                (progn
-                  ;; FIXME: Attemp to clean old section from buffer but not working
-                  ;; So we have to set `magit-inhibit-refresh' to avoid the problem.
-                  (assq-delete-all buf (oref worker sections))
-                  (insert (oref (magit-repository-local-get 'magit-gptcommit--active-worker) message)
-                          "\n"))
-              (when worker
-                (magit-gptcommit-abort))
-              (let ((start-position (point-marker))
-                    (tracking-marker (point-marker)))
-                (set-marker-insertion-type start-position nil)
-                (set-marker-insertion-type tracking-marker t)
-                (insert "\n")
-                (magit-gptcommit--llm-chat-streaming
-                 key
-                 (list :prompt (format magit-gptcommit-prompt diff)
-                       :buffer buf
-                       :position start-position
-                       :tracking-marker tracking-marker)
-                 #'magit-gptcommit--stream-insert-response))))
-          ;; store section in repository-local active worker
-          (let ((section (car (last (oref magit-root-section children))))
-                (worker (magit-repository-local-get 'magit-gptcommit--active-worker)))
-            (oset worker sections
-                  (cons (cons buf section)
-                        (oref worker sections))))
-          (setq-local magit-inhibit-refresh t)
+                 (propertize "Waiting" 'font-lock-face 'warning)))
+              (if (and worker (equal key oldkey))
+                  ;; if yes, then just insert the generated commit message
+                  (progn
+                    ;; First, remove any existing section to avoid duplicates
+                    (magit-gptcommit-remove-section)
+                    (setf (magit-gptcommit--worker-sections worker)
+                          (assq-delete-all buf (magit-gptcommit--worker-sections worker)))
+                    (insert (magit-gptcommit--worker-message
+                             (magit-repository-local-get 'magit-gptcommit--active-worker))
+                            "\n"))
+                (when worker
+                  (magit-gptcommit-abort))
+                (let ((start-position (point-marker))
+                      (tracking-marker (point-marker)))
+                  (set-marker-insertion-type start-position nil)
+                  (set-marker-insertion-type tracking-marker t)
+                  (insert "\n")
+                  (magit-gptcommit--llm-chat-streaming
+                   key
+                   (list :prompt (format magit-gptcommit-prompt diff)
+                         :buffer buf
+                         :position start-position
+                         :tracking-marker tracking-marker)
+                   #'magit-gptcommit--stream-insert-response))))
+            ;; store section in repository-local active worker
+            (let ((section (car (last (oref magit-root-section children))))
+                  (worker (magit-repository-local-get 'magit-gptcommit--active-worker)))
+              (setf (magit-gptcommit--worker-sections worker)
+                    (cons (cons buf section)
+                          (magit-gptcommit--worker-sections worker)))))
           ;; Add the buffer-local hook now that we know a section exists
-          (add-hook 'kill-buffer-hook #'magit-gptcommit--buffer-kill-hook nil t)))
-      ;; move section to correct position
-      (oset magit-root-section children
-            (magit-gptcommit--move-last-to-position
-             (oref magit-root-section children) pos)))))
-
+          (add-hook 'kill-buffer-hook #'magit-gptcommit--buffer-kill-hook nil t))
+        ;; move section to correct position
+        (oset magit-root-section children
+              (magit-gptcommit--move-last-to-position
+               (oref magit-root-section children) pos))))))
 
 (defun magit-gptcommit-generate ()
   "Generate gptcommit message and insert it into the buffer."
   (interactive)
+  (magit-gptcommit--debug "Starting new gptcommit generation in buffer %s" (current-buffer))
   (when (magit-gptcommit--running-p)
+    (magit-gptcommit--debug "Aborting existing gptcommit worker before generating new one")
     (magit-gptcommit-abort))
   (pcase (current-buffer)
     ((app (buffer-local-value 'major-mode) 'magit-status-mode)
+     (magit-gptcommit--debug "Removing any existing GPT commit section")
      (magit-gptcommit-remove-section)
+     (magit-gptcommit--debug "Inserting new GPT commit section with staged changes")
      (magit-gptcommit--insert 'staged t))
-    ((app (buffer-local-value 'major-mode) 'magit-diff-mode)) ; TODO
-    ((pred (buffer-local-value 'with-editor-mode))) ; TODO
+    ((app (buffer-local-value 'major-mode) 'magit-diff-mode)
+     (magit-gptcommit--debug "GPT commit in diff mode not implemented yet")) ; TODO
+    ((pred (buffer-local-value 'with-editor-mode))
+     (magit-gptcommit--debug "GPT commit in with-editor mode not implemented yet")) ; TODO
     (_ (user-error "Not in a magit status buffer or with-editor buffer"))))
 
 (cl-defun magit-gptcommit-abort (&optional (repository (magit-repository-local-repository)))
   "Abort gptcommit process for current REPOSITORY."
   (interactive)
   (when-let ((worker (magit-repository-local-get 'magit-gptcommit--active-worker nil repository)))
-    (dolist (pair (oref worker sections))
-      (let ((buf (car pair)))
-        (when (buffer-live-p buf)
-          (with-current-buffer buf
-            (setq-local magit-inhibit-refresh nil)))))
-    (when-let ((request (oref worker llm-request)))
-      (ignore-errors (llm-cancel-request request)))
+    (magit-gptcommit--debug "Aborting worker with key: %s" 
+                            (magit-gptcommit--worker-key worker))
+    (when (and worker
+               (magit-gptcommit--worker-llm-request worker))
+      (magit-gptcommit--debug "Cancelling LLM request for worker")
+      (condition-case err
+          (llm-cancel-request (magit-gptcommit--worker-llm-request worker))
+        (error (magit-gptcommit--debug "Error cancelling LLM request: %S" err))))
     ;; Always clean up the repository local variable
+    (magit-gptcommit--debug "Removing worker from repository-local storage")
     (magit-repository-local-delete 'magit-gptcommit--active-worker repository)))
 
 (defun magit-gptcommit-remove-section ()
@@ -385,8 +422,11 @@ NO-CACHE is non-nil if cache should be ignored."
   (interactive)
   (when-let ((section (magit-gptcommit--goto-target-section 'gptcommit))
              (inhibit-read-only t))
+    (magit-gptcommit--debug "Removing gptcommit section from buffer %s" (current-buffer))
     (with-slots (start end) section
+      (magit-gptcommit--debug "Deleting region from %s to %s" start end)
       (delete-region start end))
+    (magit-gptcommit--debug "Removing section from magit-root-section children")
     (delete section (oref magit-root-section children))))
 
 (defun magit-gptcommit--process-commit-message (message orig-message)
@@ -449,58 +489,91 @@ Executed in the context of the commit message buffer."
 
 MSG is the response.
 INFO is the request metadata."
-  (let* ((worker-buf (plist-get info :buffer))
-         (start-position (plist-get info :position))
-         (tracking-marker (plist-get info :tracking-marker))
-         (worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-         (tmp-message (oref worker message))
-         (sections (oref worker sections)))
-    (oset worker message msg)
-    (dolist (pair sections)
-      (-let (((buf . section) pair))
-        (when (buffer-live-p buf)
-          (with-current-buffer buf
-            (save-excursion
-              (let ((inhibit-read-only t)
-                    (magit-insert-section--parent magit-root-section))
-                (with-slots (start content end) section
-                  (magit-gptcommit--update-heading-status "Typing..." 'success)
-                  (delete-region start-position tracking-marker)
-                  (goto-char start-position)
-                  (insert (format "%s\n\n" msg))
-                  (setq end tracking-marker))))))))))
+  (magit-gptcommit--debug "Stream response received: %s..." (substring msg 0 (min 30 (length msg))))
+  (when-let* ((worker-buf (plist-get info :buffer))
+              (start-position (plist-get info :position))
+              (tracking-marker (plist-get info :tracking-marker))
+              (worker (magit-repository-local-get 'magit-gptcommit--active-worker)))
+    (magit-gptcommit--debug "Processing response for worker with key: %s" 
+                            (magit-gptcommit--worker-key worker))
+    (condition-case err
+        (progn
+          ;; Set worker message first to ensure it's available
+          (magit-gptcommit--debug "Updating worker message")
+          (setf (magit-gptcommit--worker-message worker) msg)
+          
+          ;; Process sections if they exist
+          (when (magit-gptcommit--worker-sections worker)
+            (magit-gptcommit--debug "Worker has %d section(s)" 
+                                   (length (magit-gptcommit--worker-sections worker)))
+            (dolist (pair (magit-gptcommit--worker-sections worker))
+              (-let (((buf . section) pair))
+                (magit-gptcommit--debug "Processing section in buffer %s" buf)
+                (when (and section 
+                          buf
+                          (buffer-live-p buf))
+                  (magit-gptcommit--debug "Buffer is live, updating content")
+                  (with-current-buffer buf
+                    (save-excursion
+                      (condition-case err2
+                          (let ((inhibit-read-only t)
+                                (magit-insert-section--parent magit-root-section))
+                            (with-slots (start content end) section
+                              (magit-gptcommit--debug "Updating section heading to 'Typing...'")
+                              (magit-gptcommit--update-heading-status "Typing..." 'success)
+                              (magit-gptcommit--debug "Replacing content from %s to %s" 
+                                                     start-position tracking-marker)
+                              (delete-region start-position tracking-marker)
+                              (goto-char start-position)
+                              (insert (format "%s\n\n" msg))
+                              (setq end tracking-marker)))
+                        (error 
+                         (magit-gptcommit--debug "Error inserting response: %S" err2)
+                         (message "Error inserting response: %S" err2))))))))))
+      (error 
+       (magit-gptcommit--debug "Stream response error: %S" err)
+       (message "Stream response error: %S" err)))))
 
 (cl-defun magit-gptcommit--stream-update-status (status &optional (error-msg))
   "Update status of gptcommit section.
 
 STATUS is one of `success', `error'.
 ERROR-MSG is error message."
-  ;; (message "magit-gptcommit--stream-update-status %s" status)
+  (magit-gptcommit--debug "Updating section status to '%s'" status)
   (when-let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-              (sections (and worker (oref worker sections))))
+              (sections (and worker 
+                             (magit-gptcommit--worker-sections worker))))
+    (magit-gptcommit--debug "Found worker with key: %s" (magit-gptcommit--worker-key worker))
+    (magit-gptcommit--debug "Worker has %d section(s)" (length sections))
     (dolist (pair sections)
       (-let (((buf . section) pair))
-        (when (buffer-live-p buf)
+        (when (and section 
+                   buf
+                   (buffer-live-p buf))
           (with-current-buffer buf
             (save-excursion
-              (let ((inhibit-read-only t)
-                    (magit-insert-section--parent magit-root-section))
-                (with-slots (start content end) section
-                  (pcase status
-                    ('success
-                     (magit-gptcommit--update-heading-status "Done" 'success)
-                     (let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-                            (last-message (and worker (oref worker message)))
-                            (key (and worker (oref worker key))))
-                       (when (and last-message key)
-                         (magit-repository-local-set 'magit-gptcommit--last-message last-message)
-                         (magit-gptcommit--cache-set key last-message)))
-                     ;; update section properties
-                     (put-text-property content end 'magit-section section)
-                     ;; update keymap
-                     (put-text-property content end 'keymap (get-text-property start 'keymap)))
-                    ('error
-                     (magit-gptcommit--update-heading-status (format "Response Error: %s" error-msg) 'error))))))))))))
+              (condition-case err
+                  (let ((inhibit-read-only t)
+                        (magit-insert-section--parent magit-root-section))
+                    (with-slots (start content end) section
+                      (pcase status
+                        ('success
+                         (magit-gptcommit--update-heading-status "Done" 'success)
+                         (let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
+                                (last-message (and worker 
+                                                   (magit-gptcommit--worker-message worker)))
+                                (key (and worker 
+                                          (magit-gptcommit--worker-key worker))))
+                           (when (and last-message key)
+                             (magit-repository-local-set 'magit-gptcommit--last-message last-message)
+                             (magit-gptcommit--cache-set key last-message)))
+                         ;; update section properties
+                         (put-text-property content end 'magit-section section)
+                         ;; update keymap
+                         (put-text-property content end 'keymap (get-text-property start 'keymap)))
+                        ('error
+                         (magit-gptcommit--update-heading-status (format "Response Error: %s" error-msg) 'error)))))
+                (error (message "Error updating section status: %S" err))))))))))
 
 ;;;; llm
 
@@ -527,24 +600,29 @@ Calls CALLBACK with the prompt response and INFO to update the response."
 INFO is the request metadata.
 Calls CALLBACK with the prompt response and INFO to update the response."
   (lambda (response)
-    (condition-case nil
+    (condition-case err
         (progn
           (funcall callback response info)
-          (let ((start-position (marker-position (plist-get info :position)))
-                (tracking-marker (marker-position (plist-get info :tracking-marker))))
-            (pulse-momentary-highlight-region start-position tracking-marker))
-          (magit-gptcommit--stream-update-status 'success)))
+          (when (and (plist-get info :position) 
+                     (plist-get info :tracking-marker))
+            (let ((start-position (marker-position (plist-get info :position)))
+                  (tracking-marker (marker-position (plist-get info :tracking-marker))))
+              (when (and start-position tracking-marker)
+                (pulse-momentary-highlight-region start-position tracking-marker))))
+          (magit-gptcommit--stream-update-status 'success))
+      (error (message "Error in response callback: %S" err)))
     (magit-gptcommit--llm-finalize)))
 
 (defun magit-gptcommit--llm-error-callback (err msg)
   "The error callback for llm."
-  (condition-case nil
-      (magit-gptcommit--stream-update-status 'error msg))
+  (condition-case err
+      (magit-gptcommit--stream-update-status 'error msg)
+    (error (message "Error in llm error callback: %S" err)))
   (magit-gptcommit--llm-finalize))
 
 (defun magit-gptcommit--llm-finalize ()
   "Finalize llm prompt response."
-  (setq-local magit-inhibit-refresh nil)
+  (magit-gptcommit--debug "Finalizing LLM prompt response, cleaning up worker")
   (magit-repository-local-delete 'magit-gptcommit--active-worker))
 
 (defun magit-gptcommit--llm-chat-streaming (key info callback)
@@ -559,6 +637,7 @@ INFO is a plist with the following keys:
 - :tracking-marker (a marker that tracks the end of the inserted response text).
 
 Call CALLBACK with the response and INFO with partial and full responses."
+  (magit-gptcommit--debug "Starting new LLM chat streaming request with key: %s" key)
   (let* ((prompt (plist-get info :prompt))
          (buffer (plist-get info :buffer))
          (llm-provider (magit-gptcommit--llm-provider))
@@ -567,6 +646,9 @@ Call CALLBACK with the response and INFO with partial and full responses."
          (response-callback
           (magit-gptcommit--llm-get-response-callback info callback))
          (error-callback #'magit-gptcommit--llm-error-callback))
+
+    (magit-gptcommit--debug "Creating worker for buffer: %s" buffer)
+    (magit-gptcommit--debug "Using prompt length: %d characters" (length prompt))
 
     (magit-repository-local-set
      'magit-gptcommit--active-worker
@@ -580,13 +662,14 @@ Call CALLBACK with the response and INFO with partial and full responses."
                      :max-tokens magit-gptcommit-llm-provider-max-tokens)
                     partial-callback
                     response-callback
-                    error-callback)))))
+                    error-callback)))
+    (magit-gptcommit--debug "Worker created and stored in repository-local variable")))
 
 ;; Add buffer-kill-hooks to abort gptcommit when magit buffers are killed
 (defun magit-gptcommit--buffer-kill-hook ()
   "Abort gptcommit when a buffer is killed that might be part of the process."
   (when-let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-              (sections (and worker (oref worker sections)))
+              (sections (and worker (magit-gptcommit--worker-sections worker)))
               (current-buf (current-buffer)))
     ;; If this buffer is in the sections, abort the entire process
     (when (assq current-buf sections)
