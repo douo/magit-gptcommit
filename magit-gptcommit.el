@@ -432,14 +432,22 @@ NO-CACHE is non-nil if cache should be ignored."
                (oldkey (and worker (magit-gptcommit--worker-key worker))))
           (if-let ((msg (and (not no-cache) (magit-gptcommit--cache-get key))))
               ;; cache hit
-              (magit-insert-section (gptcommit nil nil)
-                (magit-insert-heading
-                  (format
-                   (propertize "GPT commit: %s" 'font-lock-face 'magit-section-heading)
-                   (propertize "Cache" 'font-lock-face 'success)))
-                ;; Use the helper function for consistent formatting
-                (magit-gptcommit--insert-message (point) msg)
-                (magit-repository-local-set 'magit-gptcommit--last-message msg))
+              (progn
+                ;; If a worker is running, abort it first when using cached message
+                (when (magit-gptcommit--running-p)
+                  (magit-gptcommit--debug "Aborting any existing workers before using cached message")
+                  (magit-gptcommit-abort))
+                ;; Save message to last-messages table for consistency with streaming API
+                (puthash key (cons (float-time) msg) magit-gptcommit--last-messages)
+                ;; Insert the section with cached content
+                (magit-insert-section (gptcommit nil nil)
+                  (magit-insert-heading
+                    (format
+                     (propertize "GPT commit: %s" 'font-lock-face 'magit-section-heading)
+                     (propertize "Cache" 'font-lock-face 'success)))
+                  ;; Use the helper function for consistent formatting
+                  (magit-gptcommit--insert-message (point) msg)
+                  (magit-repository-local-set 'magit-gptcommit--last-message msg)))
             ;; cache miss
             (magit-insert-section (gptcommit nil nil)
               (magit-insert-heading
