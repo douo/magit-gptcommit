@@ -968,7 +968,7 @@ See `magit-gptcommit--llm-chat-streaming' for parameter documentation."
               (current-buf (current-buffer)))
     ;; If this buffer is in the sections, abort the entire process
     (when (assq current-buf sections)
-      (message "Magit buffer killed, aborting gptcommit process")
+      (magit-gptcommit--debug "Magit buffer killed, aborting gptcommit process")
       (magit-gptcommit-abort))))
 
 ;;;; Footer
