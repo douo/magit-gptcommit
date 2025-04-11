@@ -44,6 +44,7 @@ FORMAT-STRING and ARGS are passed to `format'."
       (with-current-buffer buf
         (goto-char (point-max))
         (let ((inhibit-read-only t)
+              (inhibit-modification-hooks t)
               (buffer-undo-list t)
               (timestamp (format-time-string "%H:%M:%S.%3N")))
           (insert (format "[%s] %s\n" timestamp msg)))))))
