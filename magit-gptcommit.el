@@ -5,7 +5,7 @@
 ;; Author: Tiou Lims <dourokinga@gmail.com>
 ;; URL: https://github.com/douo/magit-gptcommit
 ;; Version: 0.2.0
-;; Package-Requires: ((emacs "29.1") (dash "2.13.0") (magit "2.90.1") (llm "0.16.1"))
+;; Package-Requires: ((emacs "29.1") (dash "2.13.0") (magit "2.90.1"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -21,7 +21,6 @@
 (require 'dash)
 (require 'eieio)
 (require 'magit)
-(require 'llm)
 
 
 ;;;###autoload
@@ -102,6 +101,15 @@ Now, write the commit message using this format: [label]: [summary]")
 ;;                             (with-temp-buffer (url-retrieve-sentinel (current-buffer))
 ;;                                               (write-region (point-min) (point-max) file-path)
 ;;                                               (setq magit-gptcommit-prompt (buffer-string)))))))))
+
+(defcustom magit-gptcommit-backend 'llm
+  "The backend to use.
+
+Note that the respective backend needs to be installed."
+  :type '(choice
+          (const llm)
+          (const gptel))
+  :group 'magit-gptcommit)
 
 (defcustom magit-gptcommit-max-token 4096
   "Max token length."
@@ -287,8 +295,8 @@ SECTION is determined by CONDITION, which is defined in `magit-section-match'."
 Staged section position is determined by CONDITION,
 which is defined in `magit-section-match'.
 NO-CACHE is non-nil if cache should be ignored."
-  (if (not magit-gptcommit-llm-provider)
-      (error "No llm provider, please configure `magit-gptcommit-llm-provider'."))
+  ;; This should error if the backend is not loaded properly.
+  (magit-gptcommit--ensure-backend-loaded)
   (save-excursion
     (when-let ((buf (current-buffer))
                ;; generated if staged section exists
@@ -326,18 +334,25 @@ NO-CACHE is non-nil if cache should be ignored."
                   (insert "\n"))
               (when worker
                 (magit-gptcommit-abort))
-              (let ((start-position (point-marker))
-                    (tracking-marker (point-marker)))
+
+              (let* ((start-position (point-marker))
+                     (tracking-marker (point-marker))
+                     (prompt (format magit-gptcommit-prompt diff))
+                     (info (list :prompt prompt
+                                 :buffer buf
+                                 :position start-position
+                                 :tracking-marker tracking-marker)))
                 (set-marker-insertion-type start-position nil)
                 (set-marker-insertion-type tracking-marker t)
                 (insert "\n")
-                (magit-gptcommit--llm-chat-streaming
-                 key
-                 (list :prompt (format magit-gptcommit-prompt diff)
-                       :buffer buf
-                       :position start-position
-                       :tracking-marker tracking-marker)
-                 #'magit-gptcommit--stream-insert-response))))
+                (pcase magit-gptcommit-backend
+                  ('llm
+                   (magit-gptcommit--llm-chat-streaming
+                    key info #'magit-gptcommit--stream-insert-response))
+                  ('gptel
+                   (magit-gptcommit--gptel-request
+                    key info #'magit-gptcommit--stream-insert-response))
+                  (_ (user-error "Unknown backend `%s'" magit-gptcommit-backend))))))
           ;; store section in repository-local active worker
           (let ((section (car (last (oref magit-root-section children))))
                 (worker (magit-repository-local-get 'magit-gptcommit--active-worker)))
@@ -369,14 +384,21 @@ NO-CACHE is non-nil if cache should be ignored."
 (cl-defun magit-gptcommit-abort (&optional (repository (magit-repository-local-repository)))
   "Abort gptcommit process for current REPOSITORY."
   (interactive)
+  ;; This should error if the backend is not loaded properly.
+  (magit-gptcommit--ensure-backend-loaded)
   (when-let ((worker (magit-repository-local-get 'magit-gptcommit--active-worker nil repository)))
     (dolist (pair (oref worker sections))
       (let ((buf (car pair)))
         (when (buffer-live-p buf)
           (with-current-buffer buf
             (setq-local magit-inhibit-refresh nil)))))
-    (when-let ((request (oref worker llm-request)))
-      (ignore-errors (llm-cancel-request request)))
+    (pcase magit-gptcommit-backend
+      ('llm
+       (when-let ((request (oref worker llm-request)))
+         (ignore-errors (llm-cancel-request request))))
+      ('gptel
+       (gptel-abort (current-buffer)))
+      (_ (user-error "Unknown backend `%s'" magit-gptcommit-backend)))
     ;; Always clean up the repository local variable
     (magit-repository-local-delete 'magit-gptcommit--active-worker repository)))
 
@@ -443,7 +465,6 @@ Executed in the context of the commit message buffer."
     (user-error "No last gptcommit message found")))
 
 ;;;; response handling
-
 (defun magit-gptcommit--stream-insert-response (msg info)
   "Insert prompt response.
 
@@ -502,8 +523,28 @@ ERROR-MSG is error message."
                     ('error
                      (magit-gptcommit--update-heading-status (format "Response Error: %s" error-msg) 'error))))))))))))
 
-;;;; llm
+;;;; Handle backends
+(defun magit-gptcommit--ensure-backend-loaded ()
+  "Makes sure the backend is loaded.
 
+If backend in `magit-gptcommit-backend' is not loaded
+correctly this function will error."
+  (condition-case err
+      (pcase magit-gptcommit-backend
+        ('llm
+         (unless (featurep 'llm)
+           (require 'llm))
+         (unless magit-gptcommit-llm-provider
+           (user-error "No llm provider, please configure `magit-gptcommit-llm-provider'.")))
+        ('gptel
+         (unless (featurep 'gptel)
+           (require 'gptel)))
+        (_ (user-error "Unknown backend `%s'" magit-gptcommit-backend)))
+    (file-missing (user-error "Failed to load backend `%s' with error %S. Is it installed?"
+                              magit-gptcommit-backend
+                              err))))
+
+;;;; llm
 (defun magit-gptcommit--llm-provider ()
   "Return llm provider stored in `magit-gptcommit-llm-provider'.
 
@@ -592,6 +633,76 @@ Call CALLBACK with the response and INFO with partial and full responses."
     (when (assq current-buf sections)
       (message "Magit buffer killed, aborting gptcommit process")
       (magit-gptcommit-abort))))
+
+;;;; gptel
+(defun magit-gptcommit--handle-done (fsm)
+  "Handler for gptel DONE state in FSM."
+  (let* ((info (gptel-fsm-info fsm))
+         (gptel-buffer (plist-get info :buffer))
+         (tracking-marker (plist-get info :tracking-marker))
+         (start-marker (plist-get info :position))
+         response-beg response-end)
+    (with-current-buffer (marker-buffer start-marker)
+      (setq response-beg (+ start-marker 2)
+            response-end (marker-position tracking-marker))
+      (pulse-momentary-highlight-region response-beg tracking-marker))
+    (with-current-buffer gptel-buffer
+      (magit-gptcommit--stream-update-status 'success))
+    (magit-repository-local-delete 'magit-gptcommit--active-worker)))
+
+(defun magit-gptcommit--handle-type (fsm)
+  "Handler for gptel TYPE state in FSM."
+  (with-current-buffer (plist-get (gptel-fsm-info fsm) :buffer)
+    (magit-gptcommit--stream-update-status 'typing)))
+
+(defun magit-gptcommit--handle-errs (fsm)
+  "Handler for gptel ERRS state in FSM."
+  (let ((info (gptel-fsm-info fsm)))
+    (with-current-buffer (plist-get info :buffer)
+      ;; tell callback error occurred
+      (magit-gptcommit--stream-update-status 'error (plist-get info :status)))))
+
+(defun magit-gptcommit--gptel-request (key info callback)
+  "Retrieve response to prompt in INFO.
+
+KEY is a unique identifier for the request.
+
+INFO is a plist with the following keys:
+- :prompt (the prompt being sent)
+- :buffer (the magit buffer)
+- :position (marker at which to insert the response).
+- :tracking-marker (a marker that tracks the end of the inserted response text).
+
+Call CALLBACK with the response and INFO with partial and full responses."
+  (gptel-request (plist-get info :prompt)
+    :callback (lambda (response gptel-info)
+                (unless (plist-get gptel-info :tracking-marker)
+                  (plist-put gptel-info :tracking-marker
+                             (plist-get info :tracking-marker)))
+                (funcall callback response gptel-info))
+    :buffer (plist-get info :buffer)
+    :position (plist-get info :position)
+    :fsm (gptel-make-fsm
+          :state 'INIT
+          :table `((INIT . ((t                       . WAIT)))
+                   (WAIT . ((t                       . TYPE)))
+                   (TYPE . ((,#'gptel--error-p       . ERRS)
+                            (,#'gptel--tool-use-p    . TOOL)
+                            (t                       . DONE)))
+                   (TOOL . ((,#'gptel--error-p       . ERRS)
+                            (,#'gptel--tool-result-p . WAIT)
+                            (t                       . DONE))))
+          :handlers '((WAIT gptel--handle-wait)
+                      (ERRS magit-gptcommit--handle-errs gptel--fsm-last)
+                      ;; FIXME: this is useful?
+                      (TOOL gptel--handle-tool-use)
+                      (TYPE magit-gptcommit--handle-type)
+                      (DONE magit-gptcommit--handle-done gptel--fsm-last))))
+
+  (magit-repository-local-set 'magit-gptcommit--active-worker
+                              (make-magit-gptcommit--worker
+                               ;; NOTE: process is never used anywhere?
+                               :key key)))
 
 ;;;; Footer
 
