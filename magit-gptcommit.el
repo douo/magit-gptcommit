@@ -774,6 +774,70 @@ ERROR-MSG is error message."
                    (magit-gptcommit--debug "Error updating section status: %S" err)
                    (message "Error updating section status: %S" err)))))))))))
 
+(defun magit-gptcommit--backend-finalize ()
+  "Finalize prompt response."
+  (magit-gptcommit--debug "Finalizing LLM prompt response, cleaning up worker")
+  ;; Try to update the section with the latest message before cleaning up
+  (magit-gptcommit--update-section-with-latest-message)
+  ;; Clean up the worker
+  (magit-repository-local-delete 'magit-gptcommit--active-worker)
+
+  ;; Mark request as no longer in progress and update end time
+  (setq magit-gptcommit--request-in-progress nil)
+  (setq magit-gptcommit--last-request-end-time (float-time))
+  (magit-gptcommit--debug "Request completed, marked as no longer in progress"))
+
+;; Add buffer-kill-hooks to abort gptcommit when magit buffers are killed
+(defun magit-gptcommit--buffer-kill-hook ()
+  "Abort gptcommit when a buffer is killed that might be part of the process."
+  (when-let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
+              (sections (and worker (magit-gptcommit--worker-sections worker)))
+              (current-buf (current-buffer)))
+    ;; If this buffer is in the sections, abort the entire process
+    (when (assq current-buf sections)
+      (magit-gptcommit--debug "Magit buffer killed, aborting gptcommit process")
+      (magit-gptcommit-abort))))
+
+(defun magit-gptcommit--insert-message (pos msg &optional buffer)
+  "Insert MSG at position POS in BUFFER or current buffer.
+Ensures consistent message formatting across all insertion points."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (goto-char pos)
+        (insert msg "\n\n")))))
+
+(defun magit-gptcommit--update-section-with-latest-message ()
+  "Update the current gptcommit section with the newest message available.
+This ensures that even if the current worker was aborted, the newest message
+from any worker is displayed in the section."
+  (magit-gptcommit--debug "Attempting to update section with latest message")
+  (condition-case err
+      (when-let* ((newest-msg (magit-gptcommit--find-newest-message))
+                 (section (magit-gptcommit--goto-target-section 'gptcommit)))
+        (with-slots (start content end) section
+          (when (and (markerp content) (markerp end)
+                     (> (marker-position content) 1)
+                     (> (marker-position end) (marker-position content)))
+            ;; Check current content to avoid unnecessary buffer modifications
+            (let* ((current-content (buffer-substring-no-properties
+                                     (marker-position content)
+                                     (marker-position end)))
+                   (current-msg (string-trim current-content))
+                   (needs-update (not (string= current-msg newest-msg))))
+
+              (if needs-update
+                  (progn
+                    (magit-gptcommit--debug "Found valid section with different content, updating")
+                    (let ((inhibit-read-only t))
+                      ;; Clear any existing content
+                      (delete-region content end)
+                      ;; Insert newest message using the helper function
+                      (magit-gptcommit--insert-message content newest-msg)))
+                (magit-gptcommit--debug "Section already contains newest message, skipping update"))))))
+    (error
+     (magit-gptcommit--debug "Error updating section with latest message: %S" err))))
+
 ;;;; Handle backends
 (defun magit-gptcommit--ensure-backend-loaded ()
   "Makes sure the backend is loaded.
@@ -784,14 +848,23 @@ correctly this function will error."
       (pcase magit-gptcommit-backend
         ('llm
          (unless (featurep 'llm)
+           (magit-gptcommit--debug "Loading llm")
            (require 'llm))
          (unless magit-gptcommit-llm-provider
+           (magit-gptcommit--debug "No llm provider, please configure `magit-gptcommit-llm-provider'.")
            (user-error "No llm provider, please configure `magit-gptcommit-llm-provider'.")))
         ('gptel
          (unless (featurep 'gptel)
+           (magit-gptcommit--debug "Loading gptel")
            (require 'gptel)))
-        (_ (user-error "Unknown backend `%s'" magit-gptcommit-backend)))
-    (file-missing (user-error "Failed to load backend `%s' with error %S. Is it installed?"
+        (_
+         (magit-gptcommit--debug "Unknown backend `%s'" magit-gptcommit-backend)
+         (user-error "Unknown backend `%s'" magit-gptcommit-backend)))
+    (file-missing
+     (magit-gptcommit--debug "Failed to load backend `%s' with error %S. Is it installed?"
+                             magit-gptcommit-backend
+                             err)
+     (user-error "Failed to load backend `%s' with error %S. Is it installed?"
                               magit-gptcommit-backend
                               err))))
 
@@ -840,7 +913,7 @@ Calls CALLBACK with the prompt response and INFO to update the response."
       (error
        (magit-gptcommit--debug "Error in response callback: %S" err)
        (message "Error in response callback: %S" err)))
-    (magit-gptcommit--llm-finalize)))
+    (magit-gptcommit--backend-finalize)))
 
 (defun magit-gptcommit--llm-error-callback (err msg)
   "The error callback for llm."
@@ -853,65 +926,12 @@ Calls CALLBACK with the prompt response and INFO to update the response."
 
   ;; Always ensure the request is properly finalized, even if errors occurred
   (condition-case err3
-      (magit-gptcommit--llm-finalize)
+      (magit-gptcommit--backend-finalize)
     (error
      (magit-gptcommit--debug "Error in llm finalize: %S" err3)
      ;; Manually reset the request-in-progress flag as a last resort
      (setq magit-gptcommit--request-in-progress nil)
      (setq magit-gptcommit--last-request-end-time (float-time)))))
-
-(defun magit-gptcommit--insert-message (pos msg &optional buffer)
-  "Insert MSG at position POS in BUFFER or current buffer.
-Ensures consistent message formatting across all insertion points."
-  (with-current-buffer (or buffer (current-buffer))
-    (let ((inhibit-read-only t))
-      (save-excursion
-        (goto-char pos)
-        (insert msg "\n\n")))))
-
-(defun magit-gptcommit--update-section-with-latest-message ()
-  "Update the current gptcommit section with the newest message available.
-This ensures that even if the current worker was aborted, the newest message
-from any worker is displayed in the section."
-  (magit-gptcommit--debug "Attempting to update section with latest message")
-  (condition-case err
-      (when-let* ((newest-msg (magit-gptcommit--find-newest-message))
-                 (section (magit-gptcommit--goto-target-section 'gptcommit)))
-        (with-slots (start content end) section
-          (when (and (markerp content) (markerp end)
-                     (> (marker-position content) 1)
-                     (> (marker-position end) (marker-position content)))
-            ;; Check current content to avoid unnecessary buffer modifications
-            (let* ((current-content (buffer-substring-no-properties
-                                     (marker-position content)
-                                     (marker-position end)))
-                   (current-msg (string-trim current-content))
-                   (needs-update (not (string= current-msg newest-msg))))
-
-              (if needs-update
-                  (progn
-                    (magit-gptcommit--debug "Found valid section with different content, updating")
-                    (let ((inhibit-read-only t))
-                      ;; Clear any existing content
-                      (delete-region content end)
-                      ;; Insert newest message using the helper function
-                      (magit-gptcommit--insert-message content newest-msg)))
-                (magit-gptcommit--debug "Section already contains newest message, skipping update"))))))
-    (error
-     (magit-gptcommit--debug "Error updating section with latest message: %S" err))))
-
-(defun magit-gptcommit--llm-finalize ()
-  "Finalize llm prompt response."
-  (magit-gptcommit--debug "Finalizing LLM prompt response, cleaning up worker")
-  ;; Try to update the section with the latest message before cleaning up
-  (magit-gptcommit--update-section-with-latest-message)
-  ;; Clean up the worker
-  (magit-repository-local-delete 'magit-gptcommit--active-worker)
-
-  ;; Mark request as no longer in progress and update end time
-  (setq magit-gptcommit--request-in-progress nil)
-  (setq magit-gptcommit--last-request-end-time (float-time))
-  (magit-gptcommit--debug "Request completed, marked as no longer in progress"))
 
 (defun magit-gptcommit--llm-chat-streaming (key info callback)
   "Retrieve response to prompt in INFO.
@@ -999,20 +1019,10 @@ See `magit-gptcommit--llm-chat-streaming' for parameter documentation."
                     error-callback)))
     (magit-gptcommit--debug "Worker created and stored in repository-local variable")))
 
-;; Add buffer-kill-hooks to abort gptcommit when magit buffers are killed
-(defun magit-gptcommit--buffer-kill-hook ()
-  "Abort gptcommit when a buffer is killed that might be part of the process."
-  (when-let* ((worker (magit-repository-local-get 'magit-gptcommit--active-worker))
-              (sections (and worker (magit-gptcommit--worker-sections worker)))
-              (current-buf (current-buffer)))
-    ;; If this buffer is in the sections, abort the entire process
-    (when (assq current-buf sections)
-      (magit-gptcommit--debug "Magit buffer killed, aborting gptcommit process")
-      (magit-gptcommit-abort))))
-
 ;;;; gptel
 (defun magit-gptcommit--handle-done (fsm)
   "Handler for gptel DONE state in FSM."
+  (magit-gptcommit--debug "gptel in DONE state")
   (let* ((info (gptel-fsm-info fsm))
          (gptel-buffer (plist-get info :buffer))
          (tracking-marker (plist-get info :tracking-marker))
@@ -1024,19 +1034,24 @@ See `magit-gptcommit--llm-chat-streaming' for parameter documentation."
       (pulse-momentary-highlight-region response-beg tracking-marker))
     (with-current-buffer gptel-buffer
       (magit-gptcommit--stream-update-status 'success))
-    (magit-repository-local-delete 'magit-gptcommit--active-worker)))
+    (magit-gptcommit--backend-finalize)))
 
 (defun magit-gptcommit--handle-type (fsm)
   "Handler for gptel TYPE state in FSM."
+  (magit-gptcommit--debug "gptel in TYPE state")
   (with-current-buffer (plist-get (gptel-fsm-info fsm) :buffer)
     (magit-gptcommit--stream-update-status 'typing)))
 
 (defun magit-gptcommit--handle-errs (fsm)
   "Handler for gptel ERRS state in FSM."
   (let ((info (gptel-fsm-info fsm)))
+    (magit-gptcommit--debug "gptel in ERRS state: %s %s"
+                            (plist-get info :status)
+                            (plist-get info :error))
     (with-current-buffer (plist-get info :buffer)
       ;; tell callback error occurred
-      (magit-gptcommit--stream-update-status 'error (plist-get info :status)))))
+      (magit-gptcommit--stream-update-status 'error (plist-get info :status)))
+    (magit-gptcommit--backend-finalize)))
 
 (defun magit-gptcommit--gptel-request (key info callback)
   "Retrieve response to prompt in INFO.
@@ -1050,35 +1065,52 @@ INFO is a plist with the following keys:
 - :tracking-marker (a marker that tracks the end of the inserted response text).
 
 Call CALLBACK with the response and INFO with partial and full responses."
-  (gptel-request (plist-get info :prompt)
-    :callback (lambda (response gptel-info)
-                (unless (plist-get gptel-info :tracking-marker)
-                  (plist-put gptel-info :tracking-marker
-                             (plist-get info :tracking-marker)))
-                (funcall callback response gptel-info))
-    :buffer (plist-get info :buffer)
-    :position (plist-get info :position)
-    :fsm (gptel-make-fsm
-          :state 'INIT
-          :table `((INIT . ((t                       . WAIT)))
-                   (WAIT . ((t                       . TYPE)))
-                   (TYPE . ((,#'gptel--error-p       . ERRS)
-                            (,#'gptel--tool-use-p    . TOOL)
-                            (t                       . DONE)))
-                   (TOOL . ((,#'gptel--error-p       . ERRS)
-                            (,#'gptel--tool-result-p . WAIT)
-                            (t                       . DONE))))
-          :handlers '((WAIT gptel--handle-wait)
-                      (ERRS magit-gptcommit--handle-errs gptel--fsm-last)
-                      ;; FIXME: this is useful?
-                      (TOOL gptel--handle-tool-use)
-                      (TYPE magit-gptcommit--handle-type)
-                      (DONE magit-gptcommit--handle-done gptel--fsm-last))))
+  (if magit-gptcommit--request-in-progress
+      (progn
+        (magit-gptcommit--debug "⚠️ Request blocked - another LLM request is in progress")
+        (message "Another GPT commit request is already in progress. Please wait...")
+        (when-let ((section (magit-gptcommit--goto-target-section 'gptcommit)))
+          (with-slots (start) section
+            (save-excursion
+              (goto-char (+ 12 start))
+              (delete-region (point) (pos-eol))
+              (insert (propertize "Waiting for previous request" 'font-lock-face 'warning))))))
 
-  (magit-repository-local-set 'magit-gptcommit--active-worker
-                              (make-magit-gptcommit--worker
-                               ;; NOTE: process is never used anywhere?
-                               :key key)))
+    (setq magit-gptcommit--request-in-progress t)
+    (magit-gptcommit--debug "Request marked as in progress")
+
+    (magit-gptcommit--debug "Creating gptel request for buffer: %s" (plist-get info :buffer))
+    (magit-gptcommit--debug "Using prompt length: %d characters" (length (plist-get info :prompt)))
+    (gptel-request (plist-get info :prompt)
+      :callback (lambda (response gptel-info)
+                  (unless (plist-get gptel-info :tracking-marker)
+                    (plist-put gptel-info :tracking-marker
+                               (plist-get info :tracking-marker)))
+                  (funcall callback response gptel-info))
+      :buffer (plist-get info :buffer)
+      :position (plist-get info :position)
+      :fsm (gptel-make-fsm
+            :state 'INIT
+            :table `((INIT . ((t                       . WAIT)))
+                     (WAIT . ((t                       . TYPE)))
+                     (TYPE . ((,#'gptel--error-p       . ERRS)
+                              (,#'gptel--tool-use-p    . TOOL)
+                              (t                       . DONE)))
+                     (TOOL . ((,#'gptel--error-p       . ERRS)
+                              (,#'gptel--tool-result-p . WAIT)
+                              (t                       . DONE))))
+            :handlers '((WAIT gptel--handle-wait)
+                        (ERRS magit-gptcommit--handle-errs gptel--fsm-last)
+                        ;; FIXME: this is useful?
+                        (TOOL gptel--handle-tool-use)
+                        (TYPE magit-gptcommit--handle-type)
+                        (DONE magit-gptcommit--handle-done gptel--fsm-last))))
+
+    (magit-repository-local-set 'magit-gptcommit--active-worker
+                                (make-magit-gptcommit--worker
+                                 ;; NOTE: process is never used anywhere?
+                                 :key key))
+    (magit-gptcommit--debug "Worker created and stored in repository-local variable")))
 
 ;;;; Footer
 
